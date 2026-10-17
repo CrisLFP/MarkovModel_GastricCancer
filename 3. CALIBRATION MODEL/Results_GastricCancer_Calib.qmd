@@ -13,15 +13,6 @@ editor: visual
 rm(list = ls()); gc()
 ```
 
-```{r}
-#| label: set working directory
-#| include: false
-#| eval: true
-
-
-setwd("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL")
-```
-
 The following CRAN libraries were used to conduct the statistical analysis and generate the summary tables and figures for this manuscript. See the references at the end.
 
 ```{r}
@@ -51,6 +42,8 @@ library(tidyverse)
 
 
 # l_cadenas_imis <- readRDS("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL/CALIB_081026/l_cadenas_imis_1026.rds")
+
+## Cargar el archivo RData correspondiente a la fecha que se guradó.
 load("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL/CALIB_261014/calibracion_imis_141026.RData")
 ```
 
