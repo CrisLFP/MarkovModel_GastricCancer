@@ -1,0 +1,206 @@
+---
+title: "DESCOMPOSICIÓN_PREVALENCIA"
+author: "CFP. Biostatistician, M.Sc."
+format:
+  html:
+   embed-resources: true   # add to html file tables and figures
+editor: visual
+bibliography: packages.bib # bibliography file with the packages used in this analysis
+nocite: '@*'               # add bibliography in the last title, and no in the text (@ format)
+---
+
+```{r}
+#| label: clean session
+#| include: false
+
+rm(list = ls()); gc()
+```
+
+```{r}
+library(tidyverse)
+```
+
+Script para realizar la descomposición de la prevalencia general en prevalencia de Hp+ y Hp-, empleando el teorema de la probabilidad total.
+
+# Prevalencias sin incertidumbre
+
+```{r}
+#| label: inputs
+#| eval: true
+
+
+# prevalencia de lesion preneoplásica según infección de hp+ y hp-, Mulder 2024
+## Atrofia
+atrofia_hpp   <- 20.8                      ## FIJO, prev atrofia hpp
+atrofia_hpn   <- 8.6                       ## FIJO, prev atrofia hpn
+ratio_atrofia <- atrofia_hpp / atrofia_hpn ## razon atrofia hp -> la asumimos verdadera
+
+
+# prevalencia de lesión preneoplasia a partir de incidencia de Chile, de metarregresión Mulder 2024
+# SIN incertidumbre asociada
+prev_punt <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/PREVALENCIAS PERCANCER/MULDER METARREGRESION/prev_targets_mulder.rds")
+
+prev_atrofia_punt <- prev_punt$PrevAtr_combined$prev ## prev atrofia puntual metarregresion
+
+# prevalencia infeccion HP Chile, según ens 2007 -> Ferrecio 2007
+prev_hp    <- 0.73
+prev_no_hp <- 1- prev_hp
+```
+
+```{r}
+#| label: calculo prevalencias chilenas
+#| eval: true
+
+# ######## teorema probabilidad total ######## 
+# p(A) = P(A|Fact+)P(Fact+) + P(A|Fact-)P(Fact-)
+
+# atrofia hp+
+( prev_atrofia_hpp <- ( prev_atrofia_punt * ratio_atrofia ) / ( (ratio_atrofia * prev_hp) + prev_no_hp ) )
+
+# atrofia hp-
+( prev_atrofia_hpn <- (prev_atrofia_punt) / ((ratio_atrofia * prev_hp)+ prev_no_hp) )
+```
+
+```{r}
+#| label: guardar prevalencias en un df
+
+prev_helicobacter <- data.frame(
+  estado      = c("atrofia_hpp", "atrofia_hpn"),
+  prevalencia = c(prev_atrofia_hpp, prev_atrofia_hpn),
+  tipo        = "puntual"
+)
+```
+
+```{r}
+#| label: exportar prvalencias chilenas, puntuales, a partir de metarregresion
+#| eval: false
+#saveRDS(prev_helicobacter, file = "prev_helicobacter.rds")  ## ya no se usa
+
+# actualizado 14/10, con prevalencia estimada a partir incidencia estandarizada
+```
+
+## Prevalencias con indertidumbre.
+
+```{r}
+#| eval: true
+#| label: carga de modelo
+
+
+# prevalencia de lesión preneoplasia a partir de incidencia de Chile, outour de metarregresión Mulder 2024
+prev <- readRDS("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL/PREVALENCES_PRECANCER/ESTIMACIÓN_METAREGRESIÓN/prev_targets_mulder.rds")
+
+## metarregresion de atrofia
+prev_atrofia <- prev[[3]]
+# [1] logit_pred [2] sd_logit [prev] [4] ic_lb [5] ic_ub [6] x_eval [7] var_linea [8] var_tau [9] fuente
+```
+
+```{r}
+#| label: propagacion de incertidumbre.
+#| eval: true
+
+
+# ######## teorema probabilidad total ######## 
+# p(A) = P(A|Fact+)P(Fact+) + P(A|Fact-)P(Fact-)
+
+
+# semilla para replicacion
+set.seed(1989)
+
+# número de simulaciones
+N <- 100000
+
+## funciones
+expit <- function(x) 1 / (1 + exp(-x))
+logit <- function(p) log(p / (1 - p))
+
+## 1. Datos entrada FIJOS: 
+atrofia_hpp   <- 20.8                        ## FIJO (Mulder)
+atrofia_hpn   <- 8.6                         ## FIJO (Mulder)
+ratio_atrofia <- atrofia_hpp / atrofia_hpn   ## fijo
+
+prev_hp    <- 0.73                           ## FIJO (Ferreccio 2007)
+prev_no_hp <- 1 - prev_hp
+
+
+## creado más arriba
+prev_atrofia                           
+
+## punto de control.
+stopifnot(!is.null(prev_atrofia$logit_pred), !is.null(prev_atrofia$sd_logit))
+
+
+## 3. Muestreo de P(Atrofia): normal en logit, proporción 
+logit_pA <- rnorm(N,                               ## número de simulaciones
+                  mean = prev_atrofia$logit_pred,  ## media en logit
+                  sd   = prev_atrofia$sd_logit)    ## desviacion estandar en logit
+
+## N valores de P(A) en proporción
+pA_draws <- expit(logit_pA)       ##  aplicar expit() a los valores simulados que estan en logit_pA              
+
+
+## truncar valores implausibles de pA_draws (>1 o < 0)
+denom     <- (ratio_atrofia * prev_hp) + prev_no_hp  ## sale de la descomposicion prob total
+umbral    <- denom/ratio_atrofia
+frac_desc <- mean(pA_draws >= umbral)                ## fracción descartable que supera el umbral
+cat(sprintf("muestras descartadas de (P(A) >= %.3f): %.2f%%\n", umbral, 100 * frac_desc))
+
+pA_draws <- pA_draws[pA_draws < umbral]              ## conservar muestras < al umbral
+
+
+
+## 4. Descomposición (con formula de probabilidad total derivada junto a N Silva), aplicada en cada muestra
+hpp_draws <- (pA_draws * ratio_atrofia) / denom   # P(A|Hp+)
+hpn_draws <-  pA_draws                  / denom   # P(A|Hp-)
+
+
+
+## 5. Revisar que ningún draw fuera de (0,1) abierto (evita logit infinito)
+cat("rango P(A)      :", range(pA_draws),  "\n")
+cat("rango P(A|Hp+)  :", range(hpp_draws), "\n")
+cat("rango P(A|Hp-)  :", range(hpn_draws), "\n")
+
+
+
+## si algún max >= 1 o min <= 0, hay draws en el borde -> revisar antes de seguir
+stopifnot(all(hpp_draws > 0 & hpp_draws < 1),
+          all(hpn_draws > 0 & hpn_draws < 1))
+```
+
+```{r}
+#| label: resultados con incertidumbre
+#| eval: true
+
+
+## 6. Resumir cada atrofia condicional (a hp) EN LOGIT (para formato de calc_log_lik en script de calibracion) 
+resumir_logit <- function(draws) {         ##
+  l <- logit(draws)
+  list(
+    logit_pred = mean(l),
+    sd_logit   = sd(l),
+    prev       = median(draws),                       # puntul en proporción 
+    ic_lb      = quantile(draws, 0.025, names = FALSE),
+    ic_ub      = quantile(draws, 0.975, names = FALSE)
+  )
+}
+
+prev_helicobacter <- list(
+  PrevA_hpp = resumir_logit(hpp_draws),  ## aplicar resumir_logit
+  PrevA_hpn = resumir_logit(hpn_draws)   ## aplicar resumir_logit
+)
+
+## 7. Revisar resultados
+for (nm in names(prev_helicobacter)) {
+  r <- prev_helicobacter[[nm]]
+  cat(sprintf("%-10s prev = %.4f  [%.4f, %.4f]   logit = %.3f  sd_logit = %.3f\n",
+              nm, r$prev, r$ic_lb, r$ic_ub, r$logit_pred, r$sd_logit))
+}
+```
+
+```{r}
+#| label: exportar resultados para calibracion
+#| eval: true
+
+
+## 8. Exportar
+saveRDS(prev_helicobacter, "prev_helicobacter_mulder.rds")
+```

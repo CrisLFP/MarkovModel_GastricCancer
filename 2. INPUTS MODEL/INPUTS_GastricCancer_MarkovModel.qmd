@@ -1,0 +1,1873 @@
+---
+title: "INPUTS_GastricCancer_MarkovModel"
+author: "CFP. Biostatician, M.Sc."
+format:
+  html:
+   embed-resources: true   # add to html file tables and figures
+editor: visual
+bibliography: packages_load_InputsModel.bib # bibliography 
+nocite: '@*'                                # add bibliography in the last title
+---
+
+```{r}
+#| label: clean session
+#| include: false
+
+rm(list = ls()); gc()
+```
+
+# 01 Load packages
+
+```{r}
+#| label: libraries
+#| message: false
+
+library(tidyverse)    ## administración datos
+library(readxl)       ## carga de archivos excel
+library(purrr)        ## iteraciones
+```
+
+
+```{r}
+## Functions used from "purrr" package
+
+# map()     -> takes a list of vectors as input -> allows operations to be performed on each element of the list -> returns a list as the result
+
+# map2()    -> takes 2 lists of vectors as input -> allows operations between 2 lists (simultaneously, like a zipper) -> returns a list with the result of the operation on both lists
+
+# pwalk()   -> takes a list of vectors as input (like a df -> list of columns) -> matches names with function arguments to perform actions on each row of the list -> does not return a result (new list) -> but rather a side effect/modification
+
+# walk()    -> takes 1 list of vectors as input -> performs operations like map(), but not to calculate results, rather to perform actions in a loop (side effects) -> does not return a result (new list)
+
+# iwalk()   -> takes 1 list of vectors as input -> accesses the list and iterates, but considers the name/index of the element being iterated over, allowing the inclusion of dynamic names (hence i(index)) -> does not return a result (new list)
+
+# map_dbl() -> takes 1 list as input -> allows operations to be performed on each element of the list -> returns a numeric vector (double) as the result
+```
+
+# 02 Input Model Parameters
+
+### 02.1 Load general paramenters
+
+The next chunk execute in one step the specified code lines in the subtittle. You can run the lines for understand the process. Also you can modified as you wish for your particular Markov Trace Model.
+
+```{r}
+#| label: load in one step excel archive with params model as a list in Global environment
+#| eval: true
+
+## excel file name
+excel_inputs_files <- "Inputs_model.xlsx"
+
+## excel sheets names in a R list of list
+sheets_names <- excel_sheets(excel_inputs_files)
+
+## load excel sheet as unique list
+params_list_all <- sheets_names %>%      ## list with all excel sheets (within each list its params used in the MarkovModel)
+  purrr::set_names() %>% 
+  purrr::map(function(sheet){
+    read_excel(path  = excel_inputs_files,
+               sheet = sheet,
+               col_types = "text") })
+View(params_list_all)
+```
+
+```{r}
+#| eval: true
+#| label: set as environment object elements in params_list_all
+
+
+##---------- 1. Load general inputs ----------##
+df_general <- params_list_all[["GENERAL_INPUTS"]] %>% 
+  type.convert(as.is = T)                             # convert from text to a numeric
+
+df_general %>%
+  purrr::pwalk(function(name, value, ...) {
+    assign(name, value, envir = .GlobalEnv) })
+
+## elements: age, max.age, cycle_length, n_sim, age_start, brun_in
+
+# Calculates
+n.t <- max.age - age_start ## numero de ciclos
+rm(df_general)
+
+## age = 30
+## age_start = 18
+
+
+##----------  2. Strategy names ----------##
+v.names.str <- params_list_all[["STRATEGY_NAMES"]] %>%
+  pull(1) 
+
+n.str <- length(v.names.str)
+
+## elements: No prevention, UreaAire, Antígenofecal, EDA, PSEDA, Serología
+
+
+##---------- 3. state names ----------##
+v.n <- params_list_all[["STATE_NAMES"]] %>%
+  pull(1)
+
+n.s <- length(v.n)  ## 39 stages, from Normalhpn/p, 4clinicalf and Dead
+
+
+
+##---------- 4. Load RTI modeled vector ----------##
+df_rti <- params_list_all[["RTI_MODEL"]]  
+
+rti_vector  <- purrr::map_dbl(df_rti$value, 
+                 ~eval(parse(text = .x )))
+
+## elements: modeled RTI at each age. Not used anymore.
+
+
+##---------- 5. Load as elements in environment:
+##                   Transition probs
+##                   Strt probs 
+##                   Cost 
+##                   Utilities 
+##                   Acceptability 
+##                   Erradication inputs ----------##
+
+
+##---------- 5.1 quite excluded sheets ----------##
+excluded_sheets <- c("GENERAL_INPUTS",     ## already loaded
+                     "STRATEGY_NAMES",     ## already loaded
+                     "STATE_NAMES",        ## already loaded
+                     "RTI_MODEL",          ## already loaded
+                     
+                     ## probability die vectors calculated 
+                     ## and assign in chunks below (see 02.4.3)
+                     "PROB_DIE",           
+                     "PROB_DIE_30_39",     
+                     "PROB_DIE_31_100",    
+                     "PROB_DIE_30_44",     
+                     "PROB_DIE_41_100",    
+                     "PROB_DIE_46_100", 
+                     "PROBS_TRANSITION_ORG",
+                     "PROBS_TRANSITION (2)",
+                     "Hoja1"
+                     )    
+
+
+##---------- 5.2 Filter the master list for keep the necessary params sheets ----------##
+
+## set in a list the sheets with params to load
+l_params <- params_list_all[setdiff(names(params_list_all), 
+                                    excluded_sheets)]
+
+## purrr within the list
+purrr::iwalk(l_params, 
+             
+      function(df_sheet, 
+               name_sheet) {
+  
+  ## check required columns exists 
+  if (all(c("name",                            ## name of the object in the environment
+            "value",                           ## value of the object in the environment
+            "usage") %in% names(df_sheet))) {  ## indicate if the row in the list is necessary to include
+    
+    
+    ## usage filter for used params to be loaded
+    df_sheet_filter <- df_sheet %>% 
+            filter(tolower(usage) == "yes")
+    
+    
+    ## walk each row in the sheet
+    purrr::pwalk(df_sheet_filter, 
+          function(name,
+                   value,
+                   time_efect = NA, ...) {     ## indicate if that probability change in time
+      
+            
+      ## convert text in cells sheets into real (within R) value
+      final_value <- eval(parse(text = value))
+      
+      
+      ## RTI transformation
+      if(stringr::str_starts(name_sheet, "PROBS")){
+        
+        ## if time_efect !NA and time_efect == "yes", then, apply RTI transformation, otherwise repeat the value for all cycles (n.t)
+        if(!is.na(time_efect) && tolower(trimws(time_efect)) == "yes"){
+         
+          
+           # save basal value for calibration
+           assign(paste0(name, "_base"),
+                  final_value,
+                  envir = .GlobalEnv)
+          
+          
+           basal_rate <- -log(1 - final_value) 
+           
+           ajust_rate <- basal_rate * rti_vector   
+         
+           final_value <- 1 - exp(-ajust_rate)    
+         
+     }     ## end condition
+  }        ## end if() RTI transformation
+      
+      # create object in the environment
+      assign(name, 
+             final_value, 
+             envir = .GlobalEnv)
+      
+    }      ## end function within pwalk()
+  )        ## end pwalk()
+    
+   ## safety code
+    
+   } else {
+     
+        warning(paste("The sheet", name_sheet, "don not have the 'name' or 'value' or 'usage' columns. It was jumped."))
+   }
+ }         ## end function within iwalk()
+)          ## end iwalk()
+
+
+
+##  every single param loaded in the environment, 
+##  ready to fill in the transitions arrays 
+```
+
+```{r}
+#| label: Reminder params loaded:
+
+## General inputs
+## Strategy names
+## State name
+## Vector of modeled RTI
+## Transition probabilities
+## Strategy probabilities
+## Erraditacion rate
+## Costs
+## Utilities
+## Accetability probabilities
+## Erradication cost
+## Discouting factor
+```
+
+02.1 General Parameters -----------------------------------------------------
+
+Strategies:
+
+Prevention Strategy 1 - UreaAire: Prueba de Urea en Aire espirado marcado con Carbono 13 a los 30 años 1 vez
+
+Prevention Strategy 2 - Antígenofecal: Estudio de serología + antígeno en heces fecales a los 30 años 1 vez
+
+Prevention Strategy 3 - EDA: EDA para estudio histológico a los 45 años
+
+Prevention Strategy 4 - PSEDA: Pepsinógeno sérico + EDA para estudio histológico en casos positivos a los 40 años
+
+Prevention Strategy 5 - Serología: Serología + antígeno en deposiciones
+
+Describe states:
+
+Normalhpn = Normal mucosa HelicobacterPilory Negative. Normalhpp = Normal mucosa Helicobacter Pilory Positive. Gastritishpn = Gastritis Helicobacter Pilory Negative. Gastritishpp = Gastritis Helicobacter Pilory Positive. Atrophyhpn = Atrophy Helicobacter Pilory Negative. Atrophyhpp = Atrophy Gastritis Helicobacter Pilory Positive. Intestinalhpn= Intestinal Metaplasia Helicobacter Pilory Negative. Intestinalhpp = Intestinal Metaplasia Helicobacter Pilory Positive. Dysplasiahpn= Dysplasia Helicobacter Pilory Negative. Dysplasiahpp = Dysplasia Helicobacter Pilory Positive
+
+1 preclinical = Stage 1, preclinical 2 preclinical = Stage 2, preclinical 3 preclinical = Stage 3, preclinical 4 preclinical = Stage 4, preclinical 1 clinical a = Stage 1,
+
+1st year after diagnosis 1 clinical b = Stage 1, 2 years after diagnosis 1 clinical c = Stage 1, 3 years after diagnosis 1 clinical d = Stage 1, 4 years after diagnosis 1 clinical e = Stage 1, 5 years after diagnosis 1 clinical f = Stage 1, more than 6 years after diagnosis 2 clinical a = Stage 2,
+
+1st year after diagnosis 2 clinical b = Stage 2, 2 years after diagnosis 2 clinical c = Stage 2, 3 years after diagnosis 2 clinical d = Stage 2, 4 years after diagnosis 2 clinical e = Stage 2, 5 years after diagnosis 2 clinical f = Stage 2, more than 6 years after diagnosis 3 clinical a = Stage 3,
+
+1st year after diagnosis 3 clinical b = Stage 3, 2 years after diagnosis 3 clinical c = Stage 3, 3 years after diagnosis 3 clinical d = Stage 3, 4 years after diagnosis 3 clinical e = Stage 3, 5 years after diagnosis 3 clinical f = Stage 3, more than 6 years after diagnosis 4 clinical a = Stage 4,
+
+1st year after diagnosis 4 clinical b = Stage 4, 2 years after diagnosis 4 clinical c = Stage 4, 3 years after diagnosis 4 clinical d = Stage 4, 4 years after diagnosis 4 clinical e = Stage 4, 5 years after diagnosis 4 clinical f = Stage 4,
+
+more than 6 years after diagnosis Death = Death
+
+## 02.2 Probabilities of death -----------------------------------------------
+
+#### General death probabilities
+
+```{r}
+#| eval: true
+
+
+##---------- Load hazards from the relative survival analysis ----------##
+
+## hojas seleccionadas del excel con los hazards
+hazard_sheets_1 <- as.vector(t(outer(1:4,   ## creacion vector de nombres traspuesto del 1:4,  
+                             letters[1:6],  ## con las letras a:f
+                             paste0)))
+
+## lista de hazards: 
+## con map() se toma la lista de nombres y para cada uno 
+## se busca en SRfinal.xlsx y guarda la tabla resultante en una lista ordenada.
+
+# map(.x       = lista,
+#     .f       = función especificando que hacer,
+#     ...      = argumento adicionales,
+#     progress = mostrar progreso )
+
+## carga de los hazards
+hazard_list_1 <- set_names(hazard_sheets_1) %>%   ## objeto hazard_list que tiene el vector de nombres
+  purrr::map(~ read_excel("SRfinal.xlsx",         ## pasar lista nombres a purrr, y aplicar la función a cada elemento
+                         sheet = .x,              ## tomar cada hoja del vector y repetir
+                         range = "A1:B72")        ## de cada hoja tomar entre las siguientes celdas
+)
+
+
+
+##---------- Extract age-specific all-cause mortality for ages in model time horizon ----------##
+
+## Filtar lista de hazard según las edades del modelo
+## dejando solo las columna H (hazard) y conviertiendo en una matriz
+
+v_r_sr_by_age_list_1 <- hazard_list_1 %>%       ## tomar lista con los hazard
+  purrr::map( ~ .x %>%                          ## iterar lo siguiente en cada elemento de hazard_list
+    dplyr::filter(Age >= age &                  ## filtar por edades
+                    Age < max.age) %>% 
+    dplyr::select(H) %>%                        ## seleccionar H (Exceso de hazard)
+    as.matrix()                                 ## dejar resultados como una matriz dentro de la lista
+            )
+
+
+
+##---------- Load life table mortality rates from `.xlsx` format ----------##
+
+LifeTable_Chile <- read_excel("LifeTable_Chile.xlsx") ## cargar tabla de vida
+
+
+
+##---------- Extract age-specific relative survival ----------##
+
+## filtar tabla de vida con las edades del modelo y seleccionar columna TotPop (tasa de mortalidad)
+v_r_mort_by_age <- LifeTable_Chile %>%
+  dplyr::filter(Age >= age & Age < max.age) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+
+##---------- Age-specific mortality rate in the Healthy state (background mortality) for all cycles ----------##
+
+## calculo mortalidad general según ciclos por año
+v_r_HDage <-  rep(v_r_mort_by_age, 
+                  each = 1/cycle_length)
+
+## calculo mortalidad específica según ciclos por año
+v_r_Dage_list_1 <- map(
+  v_r_sr_by_age_list_1, ~          ## a cada matriz de la lista  
+    rep(.x,                        ## tomar un elemento y aplicar la funcion rep()
+        each = 1/cycle_length)
+)
+## el resultado es un vector de tamaño n.t (número de ciclos)
+
+
+
+##---------- Transform to age-specific background mortality risk for all cycles adjusting by cycle length ----------##
+
+## transformación tasa mortalidad general -> exponencial: p = 1-exp(-rt) -> a probabilidad de morir
+v_p_HDage <- 1 - exp(-v_r_HDage * cycle_length)
+
+## transformación mortalidad específica -> suma de riesgos: prob de morir general + prob de muerte por cg
+v_r_p_Dage_list_1 <- v_r_Dage_list_1 %>%                       ## tomar la lista de 24 matrices previas
+  map(~ v_p_HDage + (1 - exp(-(.x * hr_s1) * cycle_length))    ## transformacion de cada tasa .x de la matrix
+)
+```
+
+#### Age-specific probabilities of death
+
+##### For 31 - 100
+
+```{r}
+#| eval: true
+
+
+##---------- Load hazards from the relative survival analysis 31 - 100 ----------##
+hazard_sheets_2 <- as.vector(t(outer(1:4, letters[1:6], paste0)))
+
+hazard_list_2 <- set_names(hazard_sheets_2) %>%   
+  purrr::map( ~ read_excel("SR31.xlsx", sheet = .x, range = "A1:B71") )
+
+
+
+##---------- Extract age-specific all-cause mortality for ages in model time horizon ----------##
+
+v_r_sr_by_age_list_2 <- hazard_list_2 %>%            
+  purrr::map( ~ .x %>%                         
+    dplyr::filter(Age >= age & Age < max.age) %>% 
+    dplyr::select(H) %>%                      
+    as.matrix() )
+
+
+
+##---------- Load life table 31 ----------##
+
+LifeTable_Chile31 <- read_excel("LifeTable_Chile31.xlsx")
+
+
+
+##---------- Extract age-specific relative survival ----------##
+
+v_r_mort_by_age_2 <- LifeTable_Chile31 %>%
+  dplyr::filter(Age >= age & Age < max.age) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+
+##---------- Age-specific mortality rate in the Healthy state (background mortality) for all cycles ----------##
+
+## calculo mortalidad general
+v_r_HDage_2     <- rep(v_r_mort_by_age_2, each = 1/cycle_length)
+
+## calculo mortalidad específica
+v_r_Dage_list_2 <- map(v_r_sr_by_age_list_2, ~ rep(.x, each = 1/cycle_length) )
+
+
+
+## ---------- Transform to age-specific background mortality risk for all cycles adjusting by cycle length ----------##
+## transformación mortalidad general
+v_p_HDage_2 <- 1 - exp(-v_r_HDage_2 * cycle_length)
+
+## trans formación mortalidad específica
+v_r_p_Dage_list_2 <- v_r_Dage_list_2 %>%              
+  map(~ v_p_HDage_2 + (1 - exp(-(.x * hr_s2) * cycle_length))  )
+```
+
+##### For 30 - 44
+
+```{r}
+#| eval: true
+
+
+##---------- Load hazards from the relative survival analysis EDADES 30 - 44 ----------##
+hazard_sheets_3 <- as.vector(t(outer(1:4, letters[1:6], paste0)))
+
+hazard_list_3 <- set_names(hazard_sheets_3) %>%   
+  purrr::map( ~ read_excel("SRfinal.xlsx", sheet = .x, range = "A1:B16") )
+
+
+
+##---------- Extract age-specific all-cause mortality for ages in model time horizon ----------##
+
+v_r_sr_by_age_list_3 <- hazard_list_3 %>%            
+  purrr::map( ~ .x %>%                         
+    dplyr::filter(Age >= age & Age < max.age) %>% 
+    dplyr::select(H) %>%                      
+    as.matrix() )
+
+
+
+##---------- Load table 30-44 ----------##
+
+LifeTable_Chile3044 <- read_excel("LifeTable_Chile3044.xlsx")
+
+
+
+##---------- Extract age-specific relative survival ----------##
+
+v_r_mort_by_age_3 <- LifeTable_Chile3044 %>%              
+  dplyr::filter(Age >= age & Age < max.age) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+
+##---------- Age-specific mortality rate in the Healthy state (background mortality) for all cycles ----------##
+
+## calculo mortalidad general
+v_r_HDage_3 <-  rep(v_r_mort_by_age_3, each = 1/cycle_length)   
+
+## calculo mortalidad específica
+v_r_Dage_list_3 <- map(v_r_sr_by_age_list_3, 
+                       ~ rep(.x, each = 1/cycle_length) )
+
+
+
+##---------- Transform to age-specific background mortality risk for all cycles adjusting by cycle length --------------------##
+
+## transformación mortalidad general
+v_p_HDage_3 <- 1 - exp(-v_r_HDage_3 * cycle_length)
+
+## trans formación mortalidad específica
+v_r_p_Dage_list_3 <- v_r_Dage_list_3 %>%              
+  map(~ v_p_HDage_3 + (1 - exp(-(.x * hr_s3) * cycle_length))  )
+```
+
+##### For 46 - 100
+
+```{r}
+#| eval: true
+
+
+##---------- Load hazards from the relative survival analysis EDADES 46 -100 ---------- ##
+
+hazard_sheets_4 <- as.vector(t(outer(1:4, letters[1:6], paste0)))
+
+v1 <- c("Age", "H")
+hazard_list_4 <- set_names(hazard_sheets_4) %>%   
+  purrr::map( ~ read_excel("SRfinal.xlsx", sheet = .x, range = "A18:B72", col_names = v1) )
+
+
+
+##---------- Extract age-specific all-cause mortality for ages in model time horizon ---------- ##
+
+v_r_sr_by_age_list_4 <- hazard_list_4 %>%            
+  purrr::map( ~ .x %>%                         
+    dplyr::filter(Age >= age & Age < max.age) %>% 
+    dplyr::select(H) %>%                      
+    as.matrix() )
+
+
+
+##---------- load table 31 ---------- ##
+
+LifeTable_Chile46 <- read_excel("LifeTable_Chile46.xlsx")
+
+
+
+##----------  Extract age-specific relativa survival ---------- ##
+
+v_r_mort_by_age_4 <- LifeTable_Chile46 %>%          
+  dplyr::filter(Age >= age & Age < max.age) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+
+##---------- Age-specific mortality rate in the Healthy state (background mortality) for all cycles ---------- ##
+
+## calculo mortalidad general
+v_r_HDage_4 <-  rep(v_r_mort_by_age_4, each = 1/cycle_length)
+
+## calculo mortalidad específica
+v_r_Dage_list_4 <- map(v_r_sr_by_age_list_4, ~ rep(.x, each = 1/cycle_length) )
+
+
+
+##---------- Transform to age-specific background mortality risk for all cycles adjusting by cycle length ----------##
+
+## transformación mortalidad general
+v_p_HDage_4 <- 1 - exp(-v_r_HDage_4 * cycle_length)
+
+## transformación mortalidad específica
+v_r_p_Dage_list_4 <- v_r_Dage_list_4 %>%              
+  map(~ v_p_HDage_4 + (1 - exp(-(.x * hr_s4) * cycle_length))  )
+```
+
+##### For 30 - 39
+
+```{r}
+#| eval: true
+
+
+##---------- Load hazards from the relative survival analysis EDADES 30 - 39 ----------##
+
+hazard_sheets_5 <- as.vector(t(outer(1:4, letters[1:6], paste0)))
+
+hazard_list_5 <- set_names(hazard_sheets_5) %>%   
+  purrr::map( ~ read_excel("SRfinal.xlsx", sheet = .x, range = "A1:B11") )
+
+
+
+##---------- Extract age-specific all-cause mortality for ages in model time horizon ---------- ##
+
+v_r_sr_by_age_list_5 <- hazard_list_5 %>%            
+  purrr::map( ~ .x %>%                         
+    dplyr::filter(Age >= age & Age < max.age) %>% 
+    dplyr::select(H) %>%                      
+    as.matrix() )
+
+
+##---------- Load table 30-39 ---------- ##
+
+LifeTable_Chile3039 <- read_excel("LifeTable_Chile3039.xlsx")
+
+
+
+##---------- Extract age-specific relativa survival ---------- ##
+
+v_r_mort_by_age_5 <- LifeTable_Chile3039 %>%    ## v_r_mort_by_age3039 
+  dplyr::filter(Age >= age & Age < max.age) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+
+##---------- Age-specific mortality rate in the Healthy state (background mortality) for all cycles ---------- ##
+
+## calculo mortalidad general
+v_r_HDage_5 <-  rep(v_r_mort_by_age_5, each = 1/cycle_length)
+
+## calculo mortalidad específica
+v_r_Dage_list_5 <- map(v_r_sr_by_age_list_5, ~ rep(.x, each = 1/cycle_length) )
+
+
+
+##---------- Transform to age-specific background mortality risk for all cycles adjusting by cycle length ---------- ##
+
+## transformación mortalidad general
+v_p_HDage_5 <- 1 - exp(-v_r_HDage_5 * cycle_length)
+
+## transformación mortalidad específica
+v_r_p_Dage_list_5 <- v_r_Dage_list_5 %>%              
+  map(~ v_p_HDage_5 + (1 - exp(-(.x * hr_s5) * cycle_length))  )
+```
+
+##### For 41 - 100
+
+```{r}
+#| eval: true
+
+
+##---------- Load hazards from the relative survival analysis EDADES 41 -100 ---------- ##
+
+hazard_sheets_6 <- as.vector(t(outer(1:4, letters[1:6], paste0)))
+
+hazard_list_6 <- set_names(hazard_sheets_6) %>%   
+  purrr::map( ~ read_excel("SRfinal.xlsx", sheet = .x, range = "A13:B72", col_names = v1) )
+
+
+
+##---------- Extract age-specific all-cause mortality for ages in model time horizon ---------- ##
+
+v_r_sr_by_age_list_6 <- hazard_list_6 %>%            
+  purrr::map( ~ .x %>%                         
+    dplyr::filter(Age >= age & Age < max.age) %>% 
+    dplyr::select(H) %>%                      
+    as.matrix() )
+
+
+
+##---------- Load table 41 ---------- ##
+
+LifeTable_Chile41 <- read_excel("LifeTable_Chile41.xlsx")
+
+
+
+##---------- Extract age-specific relativa survival ---------- ##
+
+v_r_mort_by_age_6 <- LifeTable_Chile41 %>%      ## v_r_mort_by_age41
+  dplyr::filter(Age >= age & Age < max.age) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+
+##---------- Age-specific mortality rate in the Healthy state (background mortality) for all cycles ----------##
+
+## calculo mortalidad general
+v_r_HDage_6 <-  rep(v_r_mort_by_age_6, each = 1/cycle_length)
+
+## calculo mortalidad específica
+v_r_Dage_list_6 <- map(v_r_sr_by_age_list_6, ~ rep(.x, each = 1/cycle_length) )
+
+
+
+##---------- Transform to age-specific background mortality risk for all cycles adjusting by cycle length ---------- ##
+
+## transformación mortalidad general
+v_p_HDage_6 <- 1 - exp(-v_r_HDage_6 * cycle_length)
+
+## transformación mortalidad específica
+v_r_p_Dage_list_6 <- v_r_Dage_list_6 %>%              
+  map(~ v_p_HDage_6 + (1 - exp(-(.x * hr_s6) * cycle_length))  )
+```
+
+```{r}
+#| eval: false
+
+
+save(v_r_Dage_list_1, 
+     v_r_Dage_list_2, 
+     v_r_Dage_list_3, 
+     v_r_Dage_list_4, 
+     v_r_Dage_list_5, 
+     v_r_Dage_list_6,
+     file = "DEATHS_CG.RData")
+```
+
+## 02.3 Assign Probabilities vectors of dying in states calculated in 02.2
+
+```{r}
+#| eval: true
+
+
+## cargar en el environment los estadios benignos (las v_p_HDage)
+
+## variables de estadios benignos a muerte.
+vars_benign <- c("p.NnD", "p.NpD", "p.GnD", "p.GpD", "p.AnD", 
+                 "p.ApD", "p.InD", "p.IpD", "p.DnD", "p.DpD")
+
+# walk( .x   = lista o vector de elmentos,
+#       .f   = función a ejecutar, 
+#      ...   = argumentos adicionales para la función,
+#  .progress = FALSE )
+
+
+## Asignación de nombres
+purrr:: walk(vars_benign,                   ## vector de nombres
+             ~ assign(.x,                   ## assign(), asignar a cada elemento del vector
+                      v_p_HDage,            ## el valor a asignar
+                      envir = .GlobalEnv))  ## y lo envia al environment
+
+
+############################################################
+## variables de estadios con cáncer (probs en la lista v_r_p_Dage_list)
+
+# iwalk( .x  = lista o vector de elementos y entrega: lo que contiene cada elemento; su nombre (en ese orden)
+#        .f  = funcion a ejecutar,
+#        ... = argumento adicionales  )
+
+
+## recorrer la lista v_r_p_Dage_list
+purrr::iwalk(
+  v_r_p_Dage_list_1,                          ## recorrer esta lista de vectores -> es la lista con la suma de probs de muerte 1a-4f
+  
+  ## función a ejecutar:
+  function(vector_prob,                       ## vector_prob  : cada lista interna (vector_prob)
+           nombre_código){                    ## nombre_codigo: nombre de cada lista tomada
+    
+    
+    ## escoger número y letra
+    estadio  <- substr(nombre_código, 1, 1)   ## estadio: extraer primer caracter del nombre_código
+    letra    <- substr(nombre_código, 2, 2)   ## letra: extraer segundo caracter del nombre_código
+    
+    
+    ##  Parte 1: códigos tipo p.1caD (estadios clínicos)
+    nombre_clinico <- paste0("p.", estadio, "c", letra, "D") ## pegar "p.", estadio, "c", letra, "D"
+    assign(nombre_clinico, vector_prob, envir = .GlobalEnv)  ## asignar el vector de probabilidades y enviar al environment
+    
+    
+    ## Parte 2: códigos tipo: p.1pD (estadios preclínicos)
+    if(letra == "a") {                                            ## condición, si letra es "a"
+      nombre_preclinico <- paste0("p.", estadio, "pD")            ## pegar: "p.", estadio, "pD"
+      assign(nombre_preclinico, vector_prob, envir = .GlobalEnv)  ## asignar el vector de probabilidades y enviar al environment
+    } ## fin del if
+  }   ## fin de function
+)     ## fin de iwalk
+```
+
+#### Probability to die from 18 to 29
+
+```{r}
+#| label: ingresar ciclos faltantes dado que el modelo se inicia a los 18 años 
+
+
+# 1. Extraer la mortalidad de la tabla de vida para el burn-in (18-29 años)
+v_mort_burn_in <- LifeTable_Chile %>%
+  dplyr::filter(Age >= 18 & Age < 30) %>%
+  dplyr::select(TotPop) %>%
+  as.matrix()
+
+
+# 2. Transformar a probabilidad
+v_p_HDage_burn_in <- 1 - exp(-v_mort_burn_in * cycle_length)
+
+
+# 3. Identificar SOLO los vectores base (Terminan en D, sin números al final)
+## Uso de expresión regular estricta: 
+## empieza con p., sigue cualquier cosa (alfanumerica), termina en D.
+## vectores_base_nombres <- grep("^p\\.[A-Za-z0-9]+D$", ls(), value = TRUE)
+vectores_base_nombres <- c(
+  
+  ## benignos: solo mortalidad de base (v_p_HDage)
+  "p.NnD", "p.NpD", "p.GnD", "p.GpD", "p.AnD",
+  "p.ApD", "p.InD", "p.IpD", "p.DnD", "p.DpD",
+  
+  ## preclínicos: base + exceso del año 1 (hoja Xa de SRfinal.xlsx)
+  "p.1pD", "p.2pD", "p.3pD", "p.4pD",
+  
+  ## clínicos estadio 1: base + exceso hojas 1a:1f
+  "p.1caD", "p.1cbD", "p.1ccD", "p.1cdD", "p.1ceD", "p.1cfD",
+  
+  ## clínicos estadio 2: base + exceso hojas 2a:2f
+  "p.2caD", "p.2cbD", "p.2ccD", "p.2cdD", "p.2ceD", "p.2cfD",
+  
+  ## clínicos estadio 3: base + exceso hojas 3a:3f
+  "p.3caD", "p.3cbD", "p.3ccD", "p.3cdD", "p.3ceD", "p.3cfD",
+  
+  ## clínicos estadio 4: base + exceso hojas 4a:4f
+  "p.4caD", "p.4cbD", "p.4ccD", "p.4cdD", "p.4ceD", "p.4cfD"
+)
+
+
+# 4. Inyectar los 12 ciclos iniciales
+for (nombre in vectores_base_nombres) {
+  
+  vector_viejo <- get(nombre, envir = .GlobalEnv)
+  
+  ## riesgo base (18-29) + riesgo calculado (30-99)
+  vector_nuevo <- c(v_p_HDage_burn_in, vector_viejo)
+  
+  assign(nombre, vector_nuevo, envir = .GlobalEnv)
+
+} ## fin del for
+
+vectores_base_nombres
+length(vectores_base_nombres)
+
+stopifnot(all(sapply(mget(vectores_base_nombres, 
+                          envir = .GlobalEnv),
+                     length) == n.t))
+
+## detener el código si no todos los vectores de probabilidades de muertes tienen un largo de 82 (ciclos)
+stopifnot(all(sapply(mget(vectores_base_nombres, envir = .GlobalEnv),
+                     length) == n.t))
+```
+
+#### Probability to die from 31 to 100
+
+```{r}
+#| eval: true
+
+
+## cargar en la memoria los estadios benignos (las v_p_HDage)
+
+## variables de estadios benignos
+vars_benign_2 <- c("p.NnD31", "p.NpD31", "p.GnD31", "p.GpD31", "p.AnD31", 
+                 "p.ApD31", "p.InD31", "p.IpD31", "p.DnD31", "p.DpD31")
+
+## Asignación de nombre
+purrr:: walk(vars_benign_2, ~ assign(.x, 
+                                   v_p_HDage_2, 
+                                   envir = .GlobalEnv))
+
+############################################################
+## variables de estadios con cáncer (probs en la lista v_r_p_Dage_list_2)
+
+## recorrer la lista v_r_p_Dage_list_2
+purrr::iwalk(
+  v_r_p_Dage_list_2, ## recorrer esta lista
+  
+  ## en cada recorrido hacer:
+  function(vector_prob, 
+           nombre_código){  
+    
+    estadio  <- substr(nombre_código, 1, 1)
+    letra    <- substr(nombre_código, 2, 2)
+    
+    nombre_clinico <- paste0("p.", estadio, "c", letra, "D31")
+    assign(nombre_clinico, vector_prob, envir = .GlobalEnv)
+    
+    if(letra == "a") {
+      nombre_preclinico <- paste0("p.", estadio, "pD31")
+      assign(nombre_preclinico, vector_prob, envir = .GlobalEnv)
+    }
+  }
+)
+```
+
+```{r}
+#| eval: false
+
+
+# Used probabilitiy vectors:
+  
+p.NpD31: 
+##        Transition          lenght                      Strategy
+a.P_prev["Normalhpp", "Dead", (2 + burn_in):n.t]       <- UreaAire 
+a.P_prev2["Normalhpp", "Dead", (2 + burn_in):n.t]      <- AntigenoFecal 
+a.P_prev5["Normalhpp", "Dead", (2 + burn_in):n.t]      <- Serologia
+
+
+p.GpD31: 
+##        Transition          lenght                      Strategy
+a.P_prev["Gastritishpp", "Dead", (2 + burn_in):n.t]    <- UreaAire 
+a.P_prev2["Gastritishpp", "Dead", (2 + burn_in):n.t]   <- AntigenoFecal 
+a.P_prev5["Gastritishpp", "Dead", (2 + burn_in):n.t]   <- Serologia
+
+p.ApD31: 
+
+##        Transition          lenght                      Strategy
+a.P_prev["Atrophyhpp", "Dead", (2 + burn_in):n.t]      <- UreaAire 
+a.P_prev2["Atrophyhpp", "Dead", (2 + burn_in):n.t]     <- AntigenoFecal 
+a.P_prev5["Atrophyhpp", "Dead", (2 + burn_in):n.t]     <- Serologia
+
+p.IpD31: 
+
+##        Transition          lenght                      Strategy
+a.P_prev["Intestinalhpp", "Dead", (2 + burn_in):n.t]   <- UreaAire 
+a.P_prev2["Intestinalhpp", "Dead", (2 + burn_in):n.t]  <- AntigenoFecal 
+a.P_prev5["Intestinalhpp", "Dead", (2 + burn_in):n.t]  <- Serologia
+
+p.DpD31: 
+
+##        Transition          lenght                      Strategy
+a.P_prev["Dysplasiahpp", "Dead", 2:n.t]    <- UreaAire 
+a.P_prev2["Dysplasiahpp", "Dead", 2:n.t]   <- AntigenoFecal 
+a.P_prev5["Dysplasiahpp", "Dead", 2:n.t]   <- Serologia
+```
+
+```{r}
+#| label: calculated but not used probabilities
+#| eval: false
+
+# Calculated but not used probabilities:
+p.NnD31, p.GnD31, p.AnD31, p.InD31, p.DnD31, p.1pD31, p.2pD31, p.3pD31, p.4pD31, p.1caD31, p.2caD31, p.3caD31, p.4caD31, p.1cbD31, p.2cbD31, p.3cbD31, p.4cbD30, p.1ccD30, p.2ccD30, p.3ccD30, p.4ccD30, p.1cdD30, p.1ceD30, p.1cfD31, p.2cdD31, p.2ceD31, p.2cfD31, p.3cdD31, p.3ceD31, p.3cfD31, p.4cdD31, p.4ceD31, p.4cfD31
+```
+
+#### Probability to die from 30 to 44
+
+```{r}
+#| eval: true
+
+
+## cargar en la memoria los estadios benignos (las v_p_HDage)
+
+## variables de estadios benignos
+vars_benign_3 <- c("p.NnD3044", "p.NpD3044", "p.GnD3044", "p.GpD3044", "p.AnD3044", 
+                   "p.ApD3044", "p.InD3044", "p.IpD3044", "p.DnD3044", "p.DpD3044")
+
+## Asignación de nombre
+purrr:: walk(vars_benign_3, ~ assign(.x, 
+                                   v_p_HDage_3, 
+                                   envir = .GlobalEnv))
+
+############################################################
+## variables de estadios con cáncer (probs en la lista v_r_p_Dage_list_3)
+
+## recorrer la lista v_r_p_Dage_list_3
+purrr::iwalk(
+  v_r_p_Dage_list_3, 
+  
+  function(vector_prob, 
+           nombre_código){  
+    
+    estadio  <- substr(nombre_código, 1, 1)
+    letra    <- substr(nombre_código, 2, 2)
+    
+    nombre_clinico <- paste0("p.", estadio, "c", letra, "D3044")
+    assign(nombre_clinico, vector_prob, envir = .GlobalEnv)
+    
+    if(letra == "a") {
+      nombre_preclinico <- paste0("p.", estadio, "pD3044")
+      assign(nombre_preclinico, vector_prob, envir = .GlobalEnv)
+    }
+  }
+)
+```
+
+```{r}
+#| eval: false
+#| 
+# Used probabilities: 
+  
+p.NpD3044: 
+a.P_prev3["Normalhpp", "Dead", (1 + burn_in):(15+ burn_in)]     <- EDA
+
+p.GpD3044: 
+a.P_prev3["Gastritishpp", "Dead", (1 + burn_in):(15+ burn_in)]  <- EDA
+
+p.ApD3044: 
+a.P_prev3["Atrophyhpp", "Dead", (1 + burn_in):(15+ burn_in)]    <- EDA
+
+p.IpD3044: 
+a.P_prev3["Intestinalhpp", "Dead", (1 + burn_in):(15+ burn_in)] <- EDA
+
+p.DpD3044: 
+a.P_prev3["Dysplasiahpp", "Dead", (1 + burn_in):(15+ burn_in)]  <- EDA
+
+p.1pD3044: 
+a.P_prev3["1preclinical", "Dead", (1 + burn_in):(15+ burn_in)]  <- EDA
+
+p.2pD3044: 
+a.P_prev3["2preclinical", "Dead", (1 + burn_in):(15+ burn_in)]  <- EDA
+
+p.3pD3044: 
+a.P_prev3["3preclinical", "Dead", (1 + burn_in):(15+ burn_in)]  <- EDA
+
+p.4pD3044: 
+a.P_prev3["4preclinical", "Dead", (1 + burn_in):(15+ burn_in)]  <- EDA
+```
+
+```{r}
+#| eval: false
+
+# Calculated but not used: 
+p.NnD3044, p.GnD3044, p.AnD3044, p.InD3044, p.DnD3044, p.1caD3044, p.2caD3044,p.3caD3044, p.4caD3044, p.1cbD3044, p.2cbD3044, p.3cbD3044, p.4cbD3044, p.1ccD3044, p.2ccD3044, p.3ccD3044, p.4ccD3044, p.1cdD3044, p.2cdD3044, p.3cdD3044, p.4cdD3044, p.1ceD3044, p.2ceD3044, p.3ceD3044, p.4ceD3044, p.1cfD3044, p.2cfD3044, p.3cfD3044, p.4cfD3044
+```
+
+#### Probability to die from 46 to 100
+
+```{r}
+#| eval: true
+
+
+## cargar en la memoria los estadios benignos (las v_p_HDage)
+
+## variables de estadios benignos
+vars_benign_4 <- c("p.NnD46", "p.NpD46", "p.GnD46", "p.GpD46", "p.AnD46", 
+                 "p.ApD46", "p.InD46", "p.IpD46", "p.DnD46", "p.DpD46")
+
+## Asignación de nombre
+purrr:: walk(vars_benign_4, ~ assign(.x, 
+                                   v_p_HDage_4, 
+                                   envir = .GlobalEnv))
+
+############################################################
+## variables de estadios con cáncer (probs en la lista v_r_p_Dage_list_4)
+
+## recorrer la lista v_r_p_Dage_list_4
+purrr::iwalk(
+  v_r_p_Dage_list_4, 
+  
+  function(vector_prob, 
+           nombre_código){  
+    
+    estadio  <- substr(nombre_código, 1, 1)
+    letra    <- substr(nombre_código, 2, 2)
+
+    nombre_clinico <- paste0("p.", estadio, "c", letra, "D46")
+    assign(nombre_clinico, vector_prob, envir = .GlobalEnv)
+    
+    if(letra == "a") {
+      nombre_preclinico <- paste0("p.", estadio, "pD46")
+      assign(nombre_preclinico, vector_prob, envir = .GlobalEnv)
+    }
+  }
+)
+```
+
+```{r}
+#| eval: false
+
+# Used probabilities: 
+
+p.NpD46: 
+a.P_prev3["Normalhpp", "Dead", (17 + burn_in):n.t]     <- EDA
+
+p.GpD46: 
+a.P_prev3["Gastritishpp", "Dead", (17 + burn_in):n.t]  <- EDA
+
+p.ApD46: 
+a.P_prev3["Atrophyhpp", "Dead", (17 + burn_in):n.t]    <- EDA
+
+p.IpD46: 
+a.P_prev3["Intestinalhpp", "Dead", (17 + burn_in):n.t] <- EDA
+
+p.DpD46: 
+a.P_prev3["Dysplasiahpp", "Dead", (17 + burn_in):n.t]  <- EDA
+
+p.1pD46: 
+a.P_prev3["1preclinical", "Dead", (17 + burn_in):n.t]  <- EDA
+
+p.2pD46: 
+a.P_prev3["2preclinical", "Dead", (17 + burn_in):n.t]  <- EDA
+
+p.3pD46: 
+a.P_prev3["3preclinical", "Dead", (17 + burn_in):n.t]  <- EDA
+
+p.4pD46: 
+a.P_prev3["4preclinical", "Dead", (17 + burn_in):n.t]  <- EDA
+```
+
+```{r}
+#| eval: false
+
+
+# Calculated but no used probabilities:
+p.NnD46, p.GnD46, p.AnD46, p.InD46, p.DnD46, p.1caD46, p.2caD46, p.3caD46, p.4caD46, p.1cbD46, p.2cbD46, p.3cbD46, p.4cbD46, p.1ccD46, p.2ccD46, p.3ccD46, p.4ccD46, p.1cdD46, p.2cdD46, p.3cdD46, p.4cdD46, p.1ceD46, p.2ceD46, p.3ceD46, p.4ceD46, p.1cfD46, p.2cfD46, p.3cfD46, p.4cfD46
+```
+
+#### Probability to die from 30 to 39
+
+```{r}
+#| eval: true
+
+
+## cargar en la memoria los estadios benignos (las v_p_HDage)
+
+## variables de estadios benignos
+vars_benign_5 <- c("p.NnD3039", "p.NpD3039", "p.GnD3039", "p.GpD3039", "p.AnD3039", 
+                 "p.ApD3039", "p.InD3039", "p.IpD3039", "p.DnD3039", "p.DpD3039")
+
+## Asignación de nombre
+purrr:: walk(vars_benign_5, ~ assign(.x, 
+                                   v_p_HDage_5, 
+                                   envir = .GlobalEnv))
+
+############################################################
+## variables de estadios con cáncer (probs en la lista v_r_p_Dage_list_5)
+
+## recorrer la lista v_r_p_Dage_list_5
+purrr::iwalk(
+  v_r_p_Dage_list_5, 
+  
+  function(vector_prob, 
+           nombre_código){  
+    
+    estadio  <- substr(nombre_código, 1, 1)
+    letra    <- substr(nombre_código, 2, 2)
+    
+    nombre_clinico <- paste0("p.", estadio, "c", letra, "D3039")
+    assign(nombre_clinico, vector_prob, envir = .GlobalEnv)
+    
+    if(letra == "a") {
+      nombre_preclinico <- paste0("p.", estadio, "pD3039")
+      assign(nombre_preclinico, vector_prob, envir = .GlobalEnv)
+    }
+  }
+)
+```
+
+```{r}
+#| eval: false
+#| 
+# Used probabilities: 
+
+p.NpD3039: 
+a.P_prev4["Normalhpp", "Dead", (1 + burn_in):(10 + burn_in)]     <- PSEDA
+
+p.GpD3039: 
+a.P_prev4["Gastritishpp", "Dead", (1 + burn_in):(10 + burn_in)]  <- PSEDA
+
+p.ApD3039: 
+a.P_prev4["Atrophyhpp", "Dead", (1 + burn_in):(10 + burn_in)]    <- PSEDA
+
+p.IpD3039: 
+a.P_prev4["Intestinalhpp", "Dead", (1 + burn_in):(10 + burn_in)] <- PSEDA
+
+p.DpD3039: 
+a.P_prev4["Dysplasiahpp", "Dead", (1 + burn_in):(10 + burn_in)]  <- PSEDA
+
+p.1pD3039: 
+a.P_prev4["1preclinical", "Dead", (1 + burn_in):(10 + burn_in)]  <- PSEDA
+
+p.2pD3039: 
+a.P_prev4["2preclinical", "Dead", (1 + burn_in):(10 + burn_in)]  <- PSEDA
+
+p.3pD3039: 
+a.P_prev4["3preclinical", "Dead", (1 + burn_in):(10 + burn_in)]  <- PSEDA
+```
+
+```{r}
+#| eval: false
+
+
+# Calculated but no used probabilities:
+p.NnD3039, p.GnD3039, p.AnD3039, p.InD3039, p.DnD3039, p.4pD3039, p.1caD3039, p.2caD3039, p.3caD3039, p.4caD3039, p.1cbD3039, p.2cbD3039, p.3cbD3039, p.4cbD3039, p.1ccD3039, p.2ccD3039, p.3ccD3039, p.4ccD3039, p.1cdD3039, p.2cdD3039, p.3cdD3039, p.4cdD3039, p.1ceD3039, p.2ceD3039, p.3ceD3039, p.4ceD3039, p.1cfD3039, p.2cfD3039, p.3cfD3039, p.4cfD3039
+```
+
+#### Probability to die from 41 to 100
+
+```{r}
+#| eval: true
+#| 
+## cargar en la memoria los estadios benignos (las v_p_HDage)
+
+## variables de estadios benignos
+vars_benign_6 <- c("p.NnD41", "p.NpD41", "p.GnD41", "p.GpD41", "p.AnD41", 
+                 "p.ApD41", "p.InD41", "p.IpD41", "p.DnD41", "p.DpD41")
+
+## Asignación de nombre
+purrr:: walk(vars_benign_6, ~ assign(.x, 
+                                   v_p_HDage_6, 
+                                   envir = .GlobalEnv))
+
+############################################################
+## variables de estadios con cáncer (probs en la lista v_r_p_Dage_list_6)
+
+## recorrer la lista v_r_p_Dage_list_6
+purrr::iwalk(
+  v_r_p_Dage_list_6, 
+  
+  function(vector_prob, 
+           nombre_código){
+    
+    ## tomar número y letra
+    estadio  <- substr(nombre_código, 1, 1)
+    letra    <- substr(nombre_código, 2, 2)
+    
+    nombre_clinico <- paste0("p.", estadio, "c", letra, "D41")
+    assign(nombre_clinico, vector_prob, envir = .GlobalEnv)
+    
+    if(letra == "a") {
+      nombre_preclinico <- paste0("p.", estadio, "pD41")
+      assign(nombre_preclinico, vector_prob, envir = .GlobalEnv)
+    }
+  }
+)
+```
+
+```{r}
+#| eval: false
+
+# Used probabilities: 
+  
+p.NpD41: 
+a.P_prev4["Normalhpp", "Dead", (12 + burn_in):n.t]     <- PSEDA
+
+p.GpD41: 
+a.P_prev4["Gastritishpp", "Dead", (12 + burn_in):n.t]  <- PSEDA
+
+p.ApD41:
+a.P_prev4["Atrophyhpp", "Dead", (12 + burn_in):n.t]    <- PSEDA
+
+p.IpD41: 
+a.P_prev4["Intestinalhpp", "Dead", (12 + burn_in):n.t] <- PSEDA
+
+p.DpD41: 
+a.P_prev4["Dysplasiahpp", "Dead", (12 + burn_in):n.t]  <- PSEDA
+
+p.1pD41: 
+a.P_prev4["1preclinical", "Dead", (12 + burn_in):n.t]  <- PSEDA
+
+p.2pD41: 
+a.P_prev4["2preclinical", "Dead", (12 + burn_in):n.t]  <- PSEDA
+
+p.3pD41: 
+a.P_prev4["3preclinical", "Dead", (12 + burn_in):n.t]  <- PSEDA
+```
+
+```{r}
+#| eval: false
+
+# Calculated but no used probabilities: 
+p.NnD41, p.GnD41, p.AnD41, p.InD41, p.DnD41, p.4pD41, p.1caD41, p.2caD41, p.3caD41, p.4caD41, p.1cbD41, p.2cbD41, p.3cbD41, p.4cbD41, p.1ccD41, p.2ccD41, p.3ccD41, p.4ccD41, p.1cdD41, p.2cdD41, p.3cdD41, p.4cdD41, p.1ceD41, p.2ceD41, p.3ceD41, p.4ceD41, p.1cfD41, p.2cfD41, p.3cfD41, p.4cfD41
+```
+
+### Loaded probabilities in 02.1
+
+#### Probability to die at 30
+
+```{r}
+#| eval: true
+#| 
+## probabilidades de muerte a los 30
+p_die_30 <- read_excel("Inputs_model.xlsx", sheet = "PROB_DIE_30", col_types = "text")
+
+p_die_30 %>%
+  purrr::pwalk(function(name, value,...) {
+    
+        value <- eval(parse(text = value))
+    
+    assign(name, value, envir = .GlobalEnv)
+  })
+```
+
+```{r}
+#| eval: false
+#| 
+# Used probabilities:
+
+p.NpD30: 
+a.P_prev["Normalhpp", "Dead", (1 + burn_in)]      <- UreaAire  # 1 org
+a.P_prev2["Normalhpp", "Dead", (1 + burn_in)]     <- AntigenoFecal 
+a.P_prev5["Normalhpp", "Dead", (1 + burn_in)]     <- Serología
+
+p.GpD30:
+a.P_prev["Gastritishpp", "Dead", (1 + burn_in)]   <- UreaAire 
+a.P_prev2["Gastritishpp", "Dead", (1 + burn_in)]  <- AntigenoFecal 
+a.P_prev5["Gastritishpp", "Dead", (1 + burn_in)]  <- Serología
+
+p.ApD30: 
+a.P_prev["Atrophyhpp", "Dead", (1 + burn_in)]     <-UreaAire 
+a.P_prev2["Atrophyhpp", "Dead", (1 + burn_in)]    <- AntigenoFecal 
+a.P_prev5["Atrophyhpp", "Dead", (1 + burn_in)]    <- Serología
+
+p.IpD30: 
+a.P_prev["Intestinalhpp", "Dead", (1 + burn_in)]  <- UreAire 
+a.P_prev2["Intestinalhpp", "Dead", (1 + burn_in)] <- AntigenoFecal
+a.P_prev5["Intestinalhpp", "Dead", (1 + burn_in)] <- Serología
+
+p.DpD30: 
+a.P_prev["Dysplasiahpp", "Dead", (1 + burn_in)]   <- UreaAire 
+a.P_prev2["Dysplasiahpp", "Dead", (1 + burn_in)]  <-AntigenoFecal 
+a.P_prev5["Dysplasiahpp", "Dead", (1 + burn_in)]  <- Serología
+```
+
+```{r}
+#| eval: false
+
+
+# Calculated but no used probabilities: 
+p.NnD30, p.GnD30, p.AnD30, p.InD30, p.DnD30, p.1pD30, p.2pD30, p.3pD30, p.4pD30, p.1caD30, p.2caD30, p.3caD30, p.4caD30, p.1cbD30, p.2cbD30, p.3cbD30, p.4cbD30, p.1ccD30, p.2ccD30, p.3ccD30, p.4ccD30, p.1cdD30, p.1ceD30, p.1cfD30, p.2cdD30, p.2ceD30, p.2cfD30, p.3cdD30, p.3ceD30, p.3cfD30, p.4cdD30, p.4ceD30, p.4cfD30
+```
+
+#### Probability to die at 45
+
+```{r}
+#| eval: true
+
+p_die_45 <- read_excel("Inputs_model.xlsx", sheet = "PROB_DIE_45", col_types = "text")
+
+p_die_45 %>%
+  purrr::pwalk(function(name, value,...) {
+    
+    value <- eval(parse(text = value))
+    
+    assign(name, value, envir = .GlobalEnv)
+  })
+```
+
+```{r}
+#| eval: false
+#| 
+# Used probabilities:
+  
+p.NpD45: 
+a.P_prev3["Normalhpp", "Dead", (16 + burn_in)]     <- EDA # 16 org
+
+p.GpD45: 
+a.P_prev3["Gastritishpp", "Dead", (16 + burn_in)]  <- EDA
+
+p.ApD45: 
+a.P_prev3["Atrophyhpp", "Dead", (16 + burn_in)]    <- EDA
+
+p.IpD45: 
+a.P_prev3["Intestinalhpp", "Dead", (16 + burn_in)] <- EDA
+
+p.DpD45: 
+a.P_prev3["Dysplasiahpp", "Dead", (16 + burn_in)]  <- EDA
+
+p.1pD45: 
+a.P_prev3["1preclinical", "Dead", (16 + burn_in)]  <- EDA
+
+p.2pD45: 
+a.P_prev3["2preclinical", "Dead", (16 + burn_in)]  <- EDA
+
+p.3pD45: 
+a.P_prev3["3preclinical", "Dead", (16 + burn_in)]  <- EDA
+
+p.4pD45: 
+a.P_prev3["4preclinical", "Dead", (16 + burn_in)]  <- EDA
+```
+
+```{r}
+#| eval: false
+
+
+# Calculated but no used probabilities:
+p.NnD45, p.GnD45, p.AnD45, p.InD45, p.DnD45, p.1caD45, p.2caD45, p.3caD45, p.4caD45, p.1cbD45, p.2cbD45, p.3cbD45, p.4cbD45, p.1ccD45, p.2ccD45, p.3ccD45, p.4ccD45, p.1cdD45, p.1ceD45, p.1cfD45, p.2cdD45, p.2ceD45, p.2cfD45, p.3cdD45, p.3ceD45, p.3cfD45, p.4cdD45, p.4ceD45,p.4cfD45
+
+```
+
+#### Probability to die at 40
+
+```{r}
+#| eval: true
+#| 
+## probabilidades de muerte a los 40
+p_die_40 <- read_excel("Inputs_model.xlsx", sheet = "PROB_DIE_40", col_types = "text")
+
+p_die_40 %>%
+  purrr::pwalk(function(name, value,...) {
+    
+    value <- eval(parse(text = value))
+    
+    assign(name, value, envir = .GlobalEnv)
+  })
+```
+
+```{r}
+#| eval: false
+
+
+# Used probabilities: 
+  
+p.NpD40: 
+a.P_prev4["Normalhpp", "Dead", (11 + burn_in)]     <- PSEDA ## 11 org
+
+p.GpD40: 
+a.P_prev4["Gastritishpp", "Dead", (11 + burn_in)]  <- PSEDA
+
+p.ApD40: 
+a.P_prev4["Atrophyhpp", "Dead", (11 + burn_in)]    <- PSEDA
+
+p.IpD40: 
+a.P_prev4["Intestinalhpp", "Dead", (11 + burn_in)] <- PSEDA
+
+p.DpD40: 
+a.P_prev4["Dysplasiahpp", "Dead", (11 + burn_in)]  <- PSEDA
+
+p.1pD40: 
+a.P_prev4["1preclinical", "Dead", (11 + burn_in)]  <- PSEDA
+
+p.2pD40: 
+a.P_prev4["2preclinical", "Dead", (11 + burn_in)]  <- PSEDA
+
+p.3pD40: 
+a.P_prev4["3preclinical", "Dead", (11 + burn_in)] <- PSEDA
+```
+
+```{r}
+#| eval: false
+
+
+# Calculated but no used probabilities: 
+p.NnD40, p.GnD40, p.AnD40, p.InD40, p.DnD40, p.4pD40, p.1caD40, p.2caD40, p.3caD40, p.4caD40, p.1cbD40, p.2cbD40, p.3cbD40, p.4cbD40, p.1ccD40, p.2ccD40, p.3ccD40, p.4ccD40, p.1cdD40, p.1ceD40, p.1cfD40, p.2cdD40, p.2ceD40, p.2cfD40, p.3cdD40, p.3ceD40, p.3cfD40, p.4cdD40, p.4ceD40, p.4cfD40
+```
+
+## 02.4 Discounting factor transfomations
+
+```{r}
+#| label: discounting factor calculations
+#| eval: true
+
+
+v.dwc <- 1/((1 + d.r) ^ (0:n.t)) # calculate discount weights for costs for each cycle based on discount rate d.r
+v.dwe <- 1/((1 + d.r) ^ (0:n.t)) # calculate discount weights for effectiveness for each cycle based on discount rate d.r
+```
+
+## 02.5 non used param
+
+```{r}
+#| eval: false
+
+
+prob_not_used <- c(
+  
+  ## Edades 30
+  "p.NnD30", "p.GnD30", "p.AnD30", "p.InD30", "p.DnD30", "p.1pD30", "p.2pD30", "p.3pD30", 
+  "p.4pD30", "p.1caD30", "p.2caD30", "p.3caD30", "p.4caD30", "p.1cbD30", "p.2cbD30", 
+  "p.3cbD30", "p.4cbD30", "p.1ccD30", "p.2ccD30", "p.3ccD30", "p.4ccD30", "p.1cdD30", 
+  "p.1ceD30", "p.1cfD30", "p.2cdD30", "p.2ceD30", "p.2cfD30", "p.3cdD30", "p.3ceD30", 
+  "p.3cfD30", "p.4cdD30", "p.4ceD30", "p.4cfD30", 
+  
+  ## Edades 3039
+  "p.NnD3039", "p.GnD3039", "p.AnD3039", "p.InD3039", "p.DnD3039", "p.4pD3039", 
+  "p.1caD3039", "p.2caD3039", "p.3caD3039", "p.4caD3039", "p.1cbD3039", "p.2cbD3039", 
+  "p.3cbD3039", "p.4cbD3039", "p.1ccD3039", "p.2ccD3039", "p.3ccD3039", "p.4ccD3039", 
+  "p.1cdD3039", "p.2cdD3039", "p.3cdD3039", "p.4cdD3039", "p.1ceD3039", "p.2ceD3039", 
+  "p.3ceD3039", "p.4ceD3039", "p.1cfD3039", "p.2cfD3039", "p.3cfD3039", "p.4cfD3039",
+  
+  ## Edades 31
+  "p.NnD31", "p.GnD31", "p.AnD31", "p.InD31", "p.DnD31", "p.1pD31", "p.2pD31", "p.3pD31", 
+  "p.4pD31", "p.1caD31", "p.2caD31", "p.3caD31", "p.4caD31", "p.1cbD31", "p.2cbD31", 
+  "p.3cbD31", "p.1cfD31", "p.2cdD31", "p.2ceD31", "p.2cfD31", "p.3cdD31", "p.3ceD31", 
+  "p.3cfD31", "p.4cdD31", "p.4ceD31", "p.4cfD31",
+  
+  ## Edades 40
+  "p.NnD40", "p.GnD40", "p.AnD40", "p.InD40", "p.DnD40", "p.4pD40", "p.1caD40", 
+  "p.2caD40", "p.3caD40", "p.4caD40", "p.1cbD40", "p.2cbD40", "p.3cbD40", "p.4cbD40", 
+  "p.1ccD40", "p.2ccD40", "p.3ccD40", "p.4ccD40", "p.1cdD40", "p.1ceD40", "p.1cfD40", 
+  "p.2cdD40", "p.2ceD40", "p.2cfD40", "p.3cdD40", "p.3ceD40", "p.3cfD40", "p.4cdD40", 
+  "p.4ceD40", "p.4cfD40",
+  
+  ## Edades 41
+  "p.NnD41", "p.GnD41", "p.AnD41", "p.InD41", "p.DnD41", "p.4pD41", "p.1caD41", 
+  "p.2caD41", "p.3caD41", "p.4caD41", "p.1cbD41", "p.2cbD41", "p.3cbD41", "p.4cbD41", 
+  "p.1ccD41", "p.2ccD41", "p.3ccD41", "p.4ccD41", "p.1cdD41", "p.2cdD41", "p.3cdD41", 
+  "p.4cdD41", "p.1ceD41", "p.2ceD41", "p.3ceD41", "p.4ceD41", "p.1cfD41", "p.2cfD41", 
+  "p.3cfD41", "p.4cfD41",
+  
+  ## Edades 3044
+  "p.NnD3044", "p.GnD3044", "p.AnD3044", "p.InD3044", "p.DnD3044", "p.1caD3044", 
+  "p.2caD3044", "p.3caD3044", "p.4caD3044", "p.1cbD3044", "p.2cbD3044", "p.3cbD3044", 
+  "p.4cbD3044", "p.1ccD3044", "p.2ccD3044", "p.3ccD3044", "p.4ccD3044", "p.1cdD3044", 
+  "p.2cdD3044", "p.3cdD3044", "p.4cdD3044", "p.1ceD3044", "p.2ceD3044", "p.3ceD3044", 
+  "p.4ceD3044", "p.1cfD3044", "p.2cfD3044", "p.3cfD3044", "p.4cfD3044",
+  
+  ## Edades 45
+  "p.NnD45", "p.GnD45", "p.AnD45", "p.InD45", "p.DnD45", "p.1caD45", "p.2caD45", 
+  "p.3caD45", "p.4caD45", "p.1cbD45", "p.2cbD45", "p.3cbD45", "p.4cbD45", "p.1ccD45", 
+  "p.2ccD45", "p.3ccD45", "p.4ccD45", "p.1cdD45", "p.1ceD45", "p.1cfD45", "p.2cdD45", 
+  "p.2ceD45", "p.2cfD45", "p.3cdD45", "p.3ceD45", "p.3cfD45", "p.4cdD45", "p.4ceD45", 
+  "p.4cfD45",
+  
+  ## Edades 46
+  "p.NnD46", "p.GnD46", "p.AnD46", "p.InD46", "p.DnD46", "p.1caD46", "p.2caD46", 
+  "p.3caD46", "p.4caD46", "p.1cbD46", "p.2cbD46", "p.3cbD46", "p.4cbD46", "p.1ccD46", 
+  "p.2ccD46", "p.3ccD46", "p.4ccD46", "p.1cdD46", "p.2cdD46", "p.3cdD46", "p.4cdD46", 
+  "p.1ceD46", "p.2ceD46", "p.3ceD46", "p.4ceD46", "p.1cfD46", "p.2cfD46", "p.3cfD46", 
+  "p.4cfD46")
+
+# saveRDS(object = not_used_params, file =  "not_used_params.RDS")
+```
+
+```{r}
+#| eval: false
+
+## remove calculated params, but not used
+rm(
+  ## 
+  p.NnD30, p.GnD30, p.AnD30, p.InD30, p.DnD30, p.1pD30, p.2pD30, p.3pD30, p.4pD30, p.1caD30, p.2caD30, p.3caD30, p.4caD30, p.1cbD30, p.2cbD30, p.3cbD30, p.4cbD30, p.1ccD30, p.2ccD30, p.3ccD30, p.4ccD30, p.1cdD30, p.1ceD30, p.1cfD30, p.2cdD30, p.2ceD30, p.2cfD30, p.3cdD30, p.3ceD30, p.3cfD30, p.4cdD30, p.4ceD30, p.4cfD30, 
+  
+  ## 
+  p.NnD3039, p.GnD3039, p.AnD3039, p.InD3039, p.DnD3039, p.4pD3039, p.1caD3039, p.2caD3039, p.3caD3039, p.4caD3039, p.1cbD3039, p.2cbD3039, p.3cbD3039, p.4cbD3039, p.1ccD3039, p.2ccD3039, p.3ccD3039, p.4ccD3039, p.1cdD3039, p.2cdD3039, p.3cdD3039, p.4cdD3039, p.1ceD3039, p.2ceD3039, p.3ceD3039, p.4ceD3039, p.1cfD3039, p.2cfD3039, p.3cfD3039, p.4cfD3039,
+  
+  ##
+  p.NnD31, p.GnD31, p.AnD31, p.InD31, p.DnD31, p.1pD31, p.2pD31, p.3pD31,  p.4pD31, p.1caD31, p.2caD31, p.3caD31, p.4caD31, p.1cbD31, p.2cbD31, p.3cbD31, p.1cfD31, p.2cdD31, p.2ceD31, p.2cfD31, p.3cdD31, p.3ceD31, p.3cfD31, p.4cdD31, p.4ceD31, p.4cfD31, 
+  
+  ##
+  p.NnD40, p.GnD40, p.AnD40, p.InD40, p.DnD40, p.4pD40, p.1caD40, p.2caD40, p.3caD40, p.4caD40, p.1cbD40, p.2cbD40, p.3cbD40, p.4cbD40, p.1ccD40, p.2ccD40, p.3ccD40, p.4ccD40, p.1cdD40, p.1ceD40, p.1cfD40, p.2cdD40, p.2ceD40, p.2cfD40, p.3cdD40, p.3ceD40, p.3cfD40, p.4cdD40, p.4ceD40, p.4cfD40,
+  
+  ##
+  p.NnD41, p.GnD41, p.AnD41, p.InD41, p.DnD41, p.4pD41, p.1caD41, p.2caD41, p.3caD41, p.4caD41, p.1cbD41,  p.2cbD41, p.3cbD41, p.4cbD41, p.1ccD41, p.2ccD41, p.3ccD41, p.4ccD41, p.1cdD41, p.2cdD41, p.3cdD41, p.4cdD41, p.1ceD41, p.2ceD41, p.3ceD41, p.4ceD41, p.1cfD41, p.2cfD41, p.3cfD41, p.4cfD41,
+  
+  ##
+  p.NnD3044, p.GnD3044, p.AnD3044, p.InD3044, p.DnD3044, p.1caD3044, p.2caD3044,p.3caD3044, p.4caD3044, p.1cbD3044, p.2cbD3044, p.3cbD3044, p.4cbD3044, p.1ccD3044, p.2ccD3044, p.3ccD3044, p.4ccD3044, p.1cdD3044, p.2cdD3044, p.3cdD3044, p.4cdD3044, p.1ceD3044, p.2ceD3044, p.3ceD3044, p.4ceD3044, p.1cfD3044, p.2cfD3044, p.3cfD3044, p.4cfD3044, 
+  
+  ##
+  p.NnD45, p.GnD45, p.AnD45, p.InD45, p.DnD45, p.1caD45, p.2caD45,  p.3caD45, p.4caD45, p.1cbD45, p.2cbD45, p.3cbD45, p.4cbD45, p.1ccD45, p.2ccD45, p.3ccD45, p.4ccD45, p.1cdD45, p.1ceD45, p.1cfD45, p.2cdD45, p.2ceD45, p.2cfD45, p.3cdD45, p.3ceD45,  p.3cfD45, p.4cdD45, p.4ceD45, p.4cfD45, 
+  
+  ##
+  p.NnD46, p.GnD46, p.AnD46, p.InD46, p.DnD46, p.1caD46, p.2caD46, p.3caD46, p.4caD46, p.1cbD46, p.2cbD46, p.3cbD46, p.4cbD46, p.1ccD46, p.2ccD46, p.3ccD46, p.4ccD46, p.1cdD46, p.2cdD46, p.3cdD46, p.4cdD46, p.1ceD46, p.2ceD46, p.3ceD46, p.4ceD46, p.1cfD46, p.2cfD46, p.3cfD46, p.4cfD46)
+```
+
+Important note: all param obtained in process for this model were calculated in the previous chunks and exist as an object in the environment of this R session. If it is necessary to add some of them that were not used in this specific model, just add it into the list of the chunk below and export the .rds object for the next steps of the Markov Model.
+
+## 02.6 Save parameters list for MarkovModel
+
+```{r}
+#| eval: true
+#| label: Markov Model param list
+
+
+## set into a list MarkovModel params (from usage == yes in Excel)
+MarkovModel_params <- as.character(alist(
+
+# general inputs
+age,
+max.age,
+cycle_length,
+n_sim,
+v.n,                         
+n.s,                         
+v.names.str,                 
+n.str,                      
+n.t, 
+age_start,
+
+# transition probs
+p.NnGn, 
+p.GnAn,
+p.AI,
+
+#p.AnIn, 
+p.ID,
+#p.InDn, 
+p.DnIn, 
+p.InAn, 
+p.AnGn, 
+p.GnNn, 
+p.GnGp, 
+p.GpGn, 
+p.AnAp, 
+p.ApAn, 
+p.InIp, 
+p.IpIn, 
+p.DnDp, 
+p.DpDn, 
+p.NpGp, 
+p.NnNp, 
+p.NpNn, 
+p.GpAp, 
+p.ApIp, 
+p.IpDp, 
+p.DpIp, 
+p.IpAp, 
+p.ApGp, 
+p.GpNp, 
+p.Dn1p, 
+p.Dp1p, 
+p.1p1ca, 
+p.1cfNn,  
+p.1p2p,   
+p.2p2ca,  
+p.2cfNn,  
+p.2p3p,   
+p.3p3ca,  
+p.3cfNn,  
+p.3p4p,   
+p.4p4ca,  
+p.4cfNn,  
+
+# Urea probs
+p.pGpGn, 
+p.pApAn, 
+p.pIpIn, 
+p.pDpDn, 
+p.pNpNn, 
+
+# Ag Fecal probs
+p.p2GpGn, 
+p.p2ApAn, 
+p.p2IpIn, 
+p.p2DpDn, 
+p.p2NpNn, 
+
+# EDA probs
+p.p3GpGn,   
+p.p3ApAn,   
+p.p3IpIn,   
+p.p3DpDn,   
+p.p3NpNn,   
+p.p3_1p1ca, 
+p.p3_2p2ca, 
+p.p3_3p3ca, 
+p.p3_4p4ca, 
+
+# PSEDA probs
+p.p4GpGn,   
+p.p4ApAn,   
+p.p4IpIn,   
+p.p4DpDn,   
+p.p4NpNn,   
+p.p4_1p1ca, 
+p.p4_2p2ca, 
+p.p4_3p3ca, 
+p.p4_4p4ca, 
+
+# Serology probs
+p.p5GpGn, 
+p.p5ApAn, 
+p.p5IpIn, 
+p.p5DpDn, 
+p.p5NpNn, 
+
+# erradication rate
+te,
+
+# Dying probs
+p.NnD,  
+p.NpD,  
+p.GnD,  
+p.GpD,  
+p.AnD,  
+p.ApD,  
+p.InD,  
+p.IpD,  
+p.DnD,  
+p.DpD,  
+p.1pD,  
+p.2pD,  
+p.3pD,  
+p.4pD,  
+p.1caD, 
+p.2caD, 
+p.3caD, 
+p.4caD, 
+p.1cbD, 
+p.2cbD, 
+p.3cbD, 
+p.4cbD, 
+p.1ccD, 
+p.2ccD, 
+p.3ccD, 
+p.4ccD, 
+p.1cdD, 
+p.2cdD, 
+p.3cdD, 
+p.4cdD, 
+p.1ceD, 
+p.2ceD, 
+p.3ceD, 
+p.4ceD, 
+p.1cfD, 
+p.2cfD, 
+p.3cfD, 
+p.4cfD, 
+
+# dying prob at 30
+p.NpD30,  
+p.GpD30,  
+p.ApD30, 
+p.IpD30,  
+p.DpD30,  
+
+
+# dying prob at 30-39
+p.NpD3039,  
+p.GpD3039,  
+p.ApD3039,  
+p.IpD3039,  
+p.DpD3039,  
+p.1pD3039,  
+p.2pD3039,  
+p.3pD3039,
+
+# dying prob at 31-100
+p.NpD31,  
+p.GpD31,  
+p.ApD31,  
+p.IpD31,  
+p.DpD31,
+
+# Dying prob 30-44
+p.NpD3044,  
+p.GpD3044,  
+p.ApD3044,  
+p.IpD3044,  
+p.DpD3044,  
+p.1pD3044,  
+p.2pD3044,  
+p.3pD3044,  
+p.4pD3044,  
+
+# Dying prob 40
+p.NpD40, 
+p.GpD40,  
+p.ApD40,  
+p.IpD40,  
+p.DpD40,  
+p.1pD40,  
+p.2pD40,  
+p.3pD40,  
+
+# Dying prob 41
+p.NpD41,  
+p.GpD41,  
+p.ApD41,  
+p.IpD41,  
+p.DpD41,  
+p.1pD41,  
+p.2pD41,  
+p.3pD41,  
+
+# Dying prob 45
+p.NpD45,  
+p.GpD45,  
+p.ApD45, 
+p.IpD45,  
+p.DpD45,  
+p.1pD45,  
+p.2pD45,  
+p.3pD45,  
+p.4pD45,
+
+# Dying prob 46
+p.NpD46,  
+p.GpD46,  
+p.ApD46,  
+p.IpD46,  
+p.DpD46,  
+p.1pD46,  
+p.2pD46,  
+p.3pD46,  
+p.4pD46,
+
+# Costs
+c.Nn,  
+c.Np,  
+c.Gn,  
+c.Gp,  
+c.An,  
+c.Ap,  
+c.In,  
+c.Ip,  
+c.Dn,  
+c.Dp,  
+c.1p,  
+c.2p,  
+c.3p,  
+c.4p,  
+c.1ca,  
+c.2ca,  
+c.3ca,  
+c.4ca,  
+c.1cb,  
+c.2cb,  
+c.3cb,  
+c.4cb,  
+c.1cc,  
+c.2cc, 
+c.3cc,  
+c.4cc,  
+c.1cd,  
+c.2cd,  
+c.3cd,  
+c.4cd,  
+c.1ce,  
+c.2ce,  
+c.3ce, 
+c.4ce,  
+c.1cf,  
+c.2cf,  
+c.3cf,  
+c.4cf,  
+c.D, 
+
+# HR (if it is necesary)
+hr_s1,
+hr_s2,
+hr_s3,
+hr_s4,
+hr_s5,
+hr_s6,
+
+# Prevention cost in UF
+c.UreaAire,      
+c.EDABp,      
+c.PSEDA,
+c.Antigenofecal, 
+c.Serología,
+
+# Erradication costs
+c.errp.1, 
+c.errp.2, 
+c.errp.3, 
+c.errp.4,
+c.errp.5, 
+c.errn.1, 
+c.errn.2, 
+c.errn.5, 
+
+# Utilities
+u.Nn,  
+u.Np,  
+u.Gn,  
+u.Gp, 
+u.An,  
+u.Ap,  
+u.In,  
+u.Ip,  
+u.Dn, 
+u.Dp,  
+u.1p,  
+u.2p,  
+u.3p,  
+u.4p,  
+u.1ca,  
+u.2ca,  
+u.3ca,  
+u.4ca,  
+u.1cb,  
+u.2cb,  
+u.3cb,  
+u.4cb,  
+u.1cc,  
+u.2cc,  
+u.3cc,  
+u.4cc,  
+u.1cd,  
+u.2cd,  
+u.3cd,  
+u.4cd,  
+u.1ce,  
+u.2ce,  
+u.3ce,  
+u.4ce,  
+u.1cf,  
+u.2cf,  
+u.3cf,  
+u.4cf,  
+u.D,  
+
+# Acceptation intervention probs
+a.S0,
+a.S1,
+a.S2,
+a.S3,
+a.S4,
+a.S5,
+a.S1_1,
+a.S1_2,
+a.S2_1,
+a.S2_2,
+a.S5_1,
+a.S5_2,
+
+# Discount factor
+d.r,
+v.dwc, 
+v.dwe,
+df_rti,
+p.D1p_base,
+p.D1p) ## end alist()
+
+) ## end as.character()
+```
+
+```{r}
+#| eval: true
+## take from de environment objects include in MarkovModel_params list
+saveRDS(mget(MarkovModel_params), file = "MarkovModel_params.rds") 
+```
+
+```{r}
+#| eval: false
+# readRDS("MarkovModel_params.rds")
+```

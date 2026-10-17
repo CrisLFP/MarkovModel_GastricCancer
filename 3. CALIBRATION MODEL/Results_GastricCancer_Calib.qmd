@@ -1,0 +1,1083 @@
+---
+title: "Results_GastricCalib_Calib"
+author: "CFP"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: clean session
+#| include: false
+#| eval: true
+
+rm(list = ls()); gc()
+```
+
+```{r}
+#| label: set working directory
+#| include: false
+#| eval: true
+
+
+setwd("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL")
+```
+
+The following CRAN libraries were used to conduct the statistical analysis and generate the summary tables and figures for this manuscript. See the references at the end.
+
+```{r}
+#| eval: true
+#| label: libraries
+
+
+# calibration functionality
+library(lhs)
+
+# visualization
+library(ggplot2)
+library(plotrix)
+library(psych)
+library(scatterplot3d)
+library(IMIS)
+library(dplyr)
+library(matrixStats)
+library(GGally)
+library(tidyverse)
+```
+
+# Carga de .rds de calibracion
+
+```{r}
+#| label: load calib .rds file
+
+
+# l_cadenas_imis <- readRDS("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL/CALIB_081026/l_cadenas_imis_1026.rds")
+load("~/Documents/GitHub/Modelo_Prgrsn_CG_FONIS/CALIBRATION MODEL/CALIB_261014/calibracion_imis_141026.RData")
+```
+
+# Resultados por cadena
+
+```{r}
+#| label: carag e identificacion de cadenas
+
+## verificar que las 4 cadenas estan ok (.errorhandling = "pass")
+sapply(l_cadenas_imis, function(x) if (inherits(x, "error")) "ERROR" else nrow(x$m_calib_res))
+
+## quedarse con cadenas ok
+l_cadenas_ok <- Filter(function(x) !inherits(x, "error"), 
+                       l_cadenas_imis)
+
+## apilar las cadenas con identificador de cada cadena
+
+## Posterior_prob queda normalizada DENTRO de cada cadena 
+df_calib_ch <- purrr::map_dfr(l_cadenas_ok, function(x) {
+  
+  as.data.frame(x$m_calib_res) %>%
+    
+    mutate(chain = paste0("Cadena ", 
+                          x$chain_id))   ## id de la cadena, no su posición
+})
+
+## volver la columna de identificación de cadenas e factor
+df_calib_ch$chain <- factor(df_calib_ch$chain)
+
+
+## muestras por cadena (n_samp cada una)
+table(df_calib_ch$chain)    # -> cada cadena quedó con 35000 muestras
+```
+
+```{r}
+#| label: resumenes por cadena
+
+
+## df con información de cada cadena
+df_resumen_ch <- df_calib_ch %>%
+  
+  ## agrupar por cadena
+  group_by(chain) %>%
+  
+  ## aplicar funcion de forma iteratica a cada conjunto de datos agrupado,
+  ## a cada cadena en este caso
+  group_modify(~ {
+    
+    ## muestras de la cadena
+    m_par <- as.matrix(.x[, v_param_names])                          
+    
+    ## IC 95% y mediana
+    m_q   <- colQuantiles(m_par, probs = c(0.025, 0.5, 0.975))       
+    
+    ## crear df
+    data.frame(
+      Parametro = v_param_names,
+      MAP       = m_par[which.max(.x$Posterior_prob), ],   ## máxima posterior dentro de la cadena
+      Media     = colMeans(m_par),
+      LI_95     = m_q[, 1],
+      Mediana   = m_q[, 2],
+      LS_95     = m_q[, 3]
+    )
+  } ) %>%
+  
+  ## desagrupar df
+  ungroup()
+
+df_resumen_ch
+```
+
+```{r}
+#| label: plots información de cadenas
+
+## colores cadenas
+v_col_chain <- c(
+  "Cadena 1" = "#E41A1C",
+  "Cadena 2" = "#377EB8",
+  "Cadena 3" = "#4DAF4A",
+  "Cadena 4" = "#984EA3"
+)
+
+## 2.1 comparación visual entre cadenas: mediana + IC 95% (línea) y MAP (x)
+## signo de convergencia es que los intervalos de un mismo parámetro se superpongan
+ggplot(df_resumen_ch,
+       
+       aes(x     = chain,     ## eje X 
+           y     = Mediana,   ## eje Y puntos
+           ymin  = LI_95,     ## valor mínimo del eje Y
+           ymax  = LS_95,     ## valor maximo del eje Y
+           color = chain)) +  ## un color diferente por cada cadena
+  
+  geom_pointrange(size = 0.3) +
+  
+  geom_point(aes(y = MAP), 
+             shape = 4, 
+             size = 2) +
+  
+  scale_color_manual(values = v_col_chain) +
+  
+  facet_wrap(~ Parametro, scales = "free_y") +
+  
+  theme_bw(base_size = 10) +
+  
+  theme(axis.text.x      = element_blank(),
+        axis.ticks.x     = element_blank(),
+        strip.background = element_rect(fill = "white", color = "white"),
+        strip.text       = element_text(hjust = 0, size = 7)) +
+  
+  labs(x     = NULL,
+       y     = "Valor", 
+       color = "Cadena",
+       title = "Mediana e IC 95% (líneas) y MAP (x) por cadena")
+
+```
+
+```{r}
+#| label: pairs plot por cadena
+#| eval: false
+
+
+## No ejecutar, muy pesado
+
+for (ch in levels(df_calib_ch$chain)) {
+  
+  df_ch <- df_calib_ch %>% filter(chain == ch)   ## muestras de una cadena
+  
+  gg_pairs_ch <- GGally::ggpairs(
+    df_ch[, v_param_names],
+    upper = list(continuous = wrap("cor", color = "black", size = 4)),
+    diag  = list(continuous = wrap("barDiag", alpha = 0.8)),
+    lower = list(continuous = wrap("points", alpha = 0.1, size = 0.3)),
+    columnLabels = v_param_names
+  ) +
+    theme_bw(base_size = 10) +
+    
+    theme(axis.title.x = element_blank(),
+          axis.text.x  = element_text(size = 7, angle = 45),
+          axis.title.y = element_blank(),
+          axis.text.y  = element_blank(),
+          axis.ticks.y = element_blank(),
+          strip.background = element_rect(fill = "white", color = "white"),
+          strip.text = element_text(hjust = 0, size = 7)) +
+    ggtitle(ch)
+  
+  print(gg_pairs_ch)
+}
+
+```
+
+```{r}
+#| label: diagnosticos IMIS
+
+## 4. estadísticos IMIS por iteración, por cadena
+## fit_imis$stat: filas = iteraciones, 6 columnas sin nombre
+df_stat_ch <- purrr::map_dfr(l_cadenas_ok, function(x) {
+  
+  m_stat <- x$fit_imis$stat
+  
+  colnames(m_stat) <- c("MargLike", "UniquePoint", "MaxWeight",
+                        "ESS", "Entropy", "VarWeight")
+  
+  as.data.frame(m_stat) %>%
+    mutate(iter  = seq_len(n()),
+           chain = paste0("Cadena ", x$chain_id))
+  } ) %>%
+  
+  filter(!is.na(ESS))   ## si IMIS se detuvo antes de number_k, las filas restantes son NA
+
+
+## evolución 
+df_stat_ch %>%
+  
+  select(chain, iter, ESS, MaxWeight, MargLike) %>%
+  
+  pivot_longer(cols = c(ESS, MaxWeight, MargLike),
+               names_to = "Estadistico", 
+               values_to = "valor") %>%
+  
+  ggplot(aes(x = iter, 
+             y = valor, 
+             color = chain)) +
+  
+  geom_line() +
+  
+  scale_color_manual(values = v_col_chain) +
+  
+  facet_wrap(~ Estadistico, scales = "free_y", ncol = 1) +
+  
+  theme_bw(base_size = 10) +
+  
+  labs(x     = "Iteración IMIS", 
+       y     = NULL, 
+       color = "Cadena")
+
+## MArgLike  -> log de verosimilitud marginal, log de promedio de pesos, indica que tan probables son los targets bajo el modelo
+## MaxWeight -> peso normalizado mas grande entre todas las muestras (por cada cadena). Entre más pequeño indica que el peso se reparte entre las muestras
+## ESS -> tamaño efectivo de la muestra, número de muestras indepentiendtes e igualmente ponderadas
+# ggsave(filename = "plot_cadena.png", plot = get_last_plot())
+```
+
+# Resulatados de cadenas combinadas
+
+```{r}
+#| eval: true
+#| label: combine chains
+
+# combinar las 4 cadenas en una sola matriz posterior
+m_calib_res <- do.call(rbind, lapply(l_cadenas_imis, function(x) x$m_calib_res))
+
+# renormalizar la posterior combinada (porque cada cadena estaba normalizada por separado)
+m_calib_res[, "Posterior_prob"] <- m_calib_res[, "Posterior_prob"] / sum(m_calib_res[, "Posterior_prob"])
+
+n_total <- nrow(m_calib_res)  # = 140000
+cat("Total muestras combinadas:", n_total, "\n")
+```
+
+```{r}
+#| label: pairs plot (correlacion entre parámetros)
+#| eval: false
+
+
+gg_post_pairs_corr <- GGally::ggpairs(
+  data.frame(m_calib_res[, v_param_names]),
+  upper = list(continuous = wrap("cor", color = "black", size = 4)),
+  diag  = list(continuous = wrap("barDiag", alpha = 0.8)),
+  lower = list(continuous = wrap("points", alpha = 0.1, size = 0.3)),
+  columnLabels = v_param_names
+) +
+  theme_bw(base_size = 10) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x  = element_text(size = 7, angle = 45),
+        axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank(),
+        strip.background = element_rect(fill = "white", color = "white"),
+        strip.text = element_text(hjust = 0, size = 7))
+
+# print(gg_post_pairs_corr)
+ ggsave("post_pairs_091026.png", gg_post_pairs_corr, width = 24, height = 24, dpi = 150, limitsize = FALSE)
+```
+
+```{r}
+#| label: MAP, media e IC95%
+#| eval: true
+
+
+v_calib_post_mean <- colMeans(m_calib_res[, v_param_names])
+m_calib_res_95cr  <- colQuantiles(m_calib_res[, v_param_names], probs = c(0.025, 0.5, 0.975))
+v_calib_map       <- m_calib_res[which.max(m_calib_res[, "Posterior_prob"]), ]
+
+print("Media Posterior:"); print(round(v_calib_post_mean, 5))
+print("Intervalos de Credibilidad 95%:"); print(round(m_calib_res_95cr, 5))
+print("MAP:"); print(round(v_calib_map[v_param_names], 5))
+```
+
+```{r}
+#| eval: true
+#| label: view MAP, media and IC95%
+
+
+# df en formato long con las estimaciones por parámetro
+df_caterpillar <- data.frame(
+  parametro = v_param_names,
+  media     = v_calib_post_mean[v_param_names],
+  mediana   = m_calib_res_95cr[v_param_names, "50%"],
+  lb        = m_calib_res_95cr[v_param_names, "2.5%"],
+  ub        = m_calib_res_95cr[v_param_names, "97.5%"],
+  map       = v_calib_map[v_param_names]
+)
+
+gg_caterpillar <- ggplot(df_caterpillar, 
+                         aes(y = 1)) +
+  # IC 95%
+  geom_errorbar(aes(xmin = lb, 
+                    xmax = ub), 
+                height = 0.15,
+                color = "steelblue") +
+  
+  # mediana (punto principal)
+  geom_point(aes(x = mediana), 
+             color = "steelblue4", 
+             size = 3) +
+  
+  # media (rombo)
+  geom_point(aes(x = media), 
+             color = "black", 
+             shape = 18, 
+             size = 2.5) +
+  
+  # MAP (cruz roja)
+  geom_point(aes(x = map),
+             color = "red", 
+             shape = 4, 
+             size = 2.5, 
+             stroke = 1) +
+  
+  facet_wrap(~ parametro, scales = "free_x", ncol = 4) +
+  
+  labs(
+    title    = "Posteriors por parámetro (IC 95%)",
+    subtitle = "Punto azul = mediana | rombo negro = media | cruz roja = MAP",
+    x        = "Valor del parámetro",
+    y        = NULL
+  ) +
+  
+  theme_bw(base_size = 11) +
+  
+  theme(
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank(),
+    strip.text   = element_text(face = "bold", size = 9),
+    legend.position = "bottom"
+  )
+
+print(gg_caterpillar)
+```
+
+```{r}
+#| label: propagacion de incertidumbre
+#| eval: true
+
+# matrices de outputs
+m_out_inc_edad  <- matrix(NA, nrow = n_total, ncol = 6)    # incidencia por grupo edad
+v_out_inc_nac   <- numeric(n_total)                        # incidencia nacional
+m_out_prop_agg  <- matrix(NA, nrow = n_total, ncol = 4)    # estadios agregados
+m_out_PrevNG    <- matrix(NA, nrow = n_total, ncol = 4)    # normal-gastritis
+v_out_PrevI     <- numeric(n_total)                        # metaplasia
+v_out_PrevD     <- numeric(n_total)                        # displasia
+v_out_PrevA_hpp <- numeric(n_total)                        # atrofia hp+
+v_out_PrevA_hpn <- numeric(n_total)                        # atrofia hp-
+
+# excluir los 4 tramos (se manejan vía expand, no por copia directa)
+params_no_rti <- v_param_names[!v_param_names %in% c("p.D1p_t1","p.D1p_t2","p.D1p_t3","p.D1p_t4",
+                                                     "p.ID_t1", "p.ID_t2", "p.ID_t3", "p.ID_t4",
+                                                     "p.AI_t1", "p.AI_t2", "p.AI_t3", "p.AI_t4",
+                                                     "p.NnGn_t1", "p.NnGn_t2", "p.NnGn_t3", "p.NnGn_t4",
+                                                     "p.NpGp_t1", "p.NpGp_t2", "p.NpGp_t3", "p.NpGp_t4")]
+
+cat("Propagando incertidumbre con", n_total, "sets...\n")
+t_init_prop <- Sys.time()
+
+suppressMessages({
+  for (i in 1:n_total) {
+
+    v_params_all <- inputs_cg_MarkovModel
+    v_params_all[params_no_rti] <- m_calib_res[i, params_no_rti]
+
+    v_params_all[["p.D1p"]] <- expand_p.D1p(
+      m_calib_res[i, "p.D1p_t1"],
+      m_calib_res[i, "p.D1p_t2"],
+      m_calib_res[i, "p.D1p_t3"],
+      m_calib_res[i, "p.D1p_t4"]
+    )
+    
+    v_params_all[["p.ID"]] <- expand_p.ID(
+      m_calib_res[i, "p.ID_t1"],
+      m_calib_res[i, "p.ID_t2"],
+      m_calib_res[i, "p.ID_t3"],
+      m_calib_res[i, "p.ID_t4"]
+    )
+    
+    v_params_all[["p.AI"]] <- expand_p.AI(
+      m_calib_res[i, "p.AI_t1"],
+      m_calib_res[i, "p.AI_t2"],
+      m_calib_res[i, "p.AI_t3"],
+      m_calib_res[i, "p.AI_t4"]
+    )
+    
+      v_params_all[["p.NnGn"]] <- expand_p.NnGn(
+      m_calib_res[i, "p.NnGn_t1"],
+      m_calib_res[i, "p.NnGn_t2"],
+      m_calib_res[i, "p.NnGn_t3"],
+      m_calib_res[i, "p.NnGn_t4"]
+    )
+
+    v_params_all[["p.NpGp"]] <- expand_p.NpGp(
+      m_calib_res[i, "p.NpGp_t1"],
+      m_calib_res[i, "p.NpGp_t2"],
+      m_calib_res[i, "p.NpGp_t3"],
+      m_calib_res[i, "p.NpGp_t4"]
+    )
+
+    model_res_temp <- runs_gc_markov(v_params_all)
+
+    m_out_inc_edad[i, ] <- model_res_temp$incidencia_edad
+    v_out_inc_nac[i]    <- model_res_temp$incidencia_nacional
+    m_out_prop_agg[i, ] <- c(model_res_temp$PropSick_estadio1_agg,
+                             model_res_temp$PropSick_estadio2_agg,
+                             model_res_temp$PropSick_estadio3_agg,
+                             model_res_temp$PropSick_estadio4_agg)
+    m_out_PrevNG[i, ]   <- model_res_temp$PrevNG_combined
+    v_out_PrevI[i]      <- model_res_temp$PrevI_combined
+    v_out_PrevD[i]      <- model_res_temp$PrevD_combined
+    v_out_PrevA_hpp[i]  <- model_res_temp$PrevA_hpp
+    v_out_PrevA_hpn[i]  <- model_res_temp$PrevA_hpn
+
+    if (i %% 1000 == 0) cat("  ", i, "/", n_total, "(", round(i/n_total*100, 1), "%)\n")
+  }
+})
+
+comp_time_prop <- Sys.time() - t_init_prop
+cat("Tiempo:", round(as.numeric(comp_time_prop, units = "mins"), 2), "minutos\n")
+
+saveRDS(list(m_out_inc_edad  = m_out_inc_edad,
+             v_out_inc_nac   = v_out_inc_nac,
+             m_out_prop_agg  = m_out_prop_agg,
+             m_out_PrevNG    = m_out_PrevNG,
+             v_out_PrevI     = v_out_PrevI,
+             v_out_PrevD     = v_out_PrevD,
+             v_out_PrevA_hpp = v_out_PrevA_hpp,
+             v_out_PrevA_hpn = v_out_PrevA_hpn),
+        "outputs_propagacion_141026.rds")
+## propagación tardeo 23 min.
+```
+
+```{r}
+#| eval: false
+m_out_inc <- readRDS("outputs_propagacion_081026.rds")
+
+## enviar al entorno
+list2env(m_out_inc, envir = .GlobalEnv)
+```
+
+```{r}
+# hacer tabla de prevalencias para normal hacer promedio entre hp+ y hop- y compararlo con el targte de Bellolio.
+```
+
+```{r}
+#| eval: true
+
+## incidencia por edad
+v_inc_edad_mean  <- colMeans(m_out_inc_edad)
+m_inc_edad_95    <- colQuantiles(m_out_inc_edad, probs = c(0.025, 0.975))
+
+## incidencia nacional
+inc_nac_mean <- mean(v_out_inc_nac)
+inc_nac_95   <- quantile(v_out_inc_nac, probs = c(0.025, 0.975))
+
+## estadios
+v_prop_mean <- colMeans(m_out_prop_agg)
+m_prop_95   <- colQuantiles(m_out_prop_agg, probs = c(0.025, 0.975))
+  
+## gastritis
+v_PrevNG_mean <- colMeans(m_out_PrevNG)
+m_PrevNG_95   <- colQuantiles(m_out_PrevNG, probs = c(0.025, 0.975))
+
+## prevalencias de estadios (metaplasia, displasia, atrofia hpp, atrofia hpn)
+PrevI_mean     <- mean(v_out_PrevI); PrevI_95 <- quantile(v_out_PrevI, probs = c(0.025, 0.975))
+PrevD_mean     <- mean(v_out_PrevD); PrevD_95 <- quantile(v_out_PrevD, probs = c(0.025, 0.975))
+PrevA_hpp_mean <- mean(v_out_PrevA_hpp); PrevA_hpp_95 <- quantile(v_out_PrevA_hpp, probs = c(0.025, 0.975))
+PrevA_hpn_mean <- mean(v_out_PrevA_hpn); PrevA_hpn_95 <- quantile(v_out_PrevA_hpn, probs = c(0.025, 0.975))
+```
+
+```{r}
+#| eval: true
+
+# 1. Incidencia
+df_inc_edad <- data.frame(
+  grupo  = lst_targets$incidencia_edad$grupo,
+  target = lst_targets$incidencia_edad$value,
+  modelo = v_inc_edad_mean,
+  lb     = m_inc_edad_95[, 1],
+  ub     = m_inc_edad_95[, 2]
+)
+df_inc_edad$grupo <- factor(df_inc_edad$grupo, 
+                            levels = lst_targets$incidencia_edad$grupo)
+
+gg_inc_edad <- ggplot(df_inc_edad, 
+                      aes(x = grupo, 
+                          group = 1)) +
+  
+  geom_ribbon(aes(ymin = lb,
+                  ymax = ub), 
+              alpha = 0.3, 
+              fill = "steelblue") +
+  
+  geom_line(aes(y = modelo),
+            color = "steelblue", 
+            linewidth = 1.2) +
+  
+  geom_point(aes(y = target), 
+             color = "black", 
+             size = 3) +
+  
+  labs(title = "Incidencia de Cáncer Gástrico por grupo etario",
+       x = "Grupo etario", 
+       y = "Tasa x100.000") +
+  
+  theme_bw(base_size = 13)
+
+print(gg_inc_edad)
+
+# incidencia nacional: mejor como texto/punto único, no línea
+cat(sprintf("Incidencia nacional ASR - target: %.2f | modelo: %.2f [%.2f, %.2f]\n",
+            lst_targets$incidencia$value, inc_nac_mean, inc_nac_95[1], inc_nac_95[2]))
+```
+
+```{r}
+#| eval: false
+#| label: chequeos varios 2
+
+
+# reconstruir v_params_all con la mediana (o usá un set cualquiera de m_calib_res)
+mr <- runs_gc_markov(v_params_all)   # el que ya tengas armado
+mr
+
+# las tasas por tramo que el modelo reporta
+mr$incidencia_edad                    # 6 valores
+
+# tasa nacional
+mr$incidencia_nacional                # 1 valor
+
+# ahora reproducí el nacional "a mano" de dos formas:
+# forma A: como lo hace el código (ponderar por pop_ine_tramo)
+pop_ine_tramo <- c(6153716, 2695688, 2488314, 2222376, 1519974, 450362)
+pop_ine_total <- 19828563
+sum(mr$incidencia_edad * pop_ine_tramo) / pop_ine_total
+
+
+
+
+
+data.frame(
+  tramo  = lst_targets$incidencia_edad$grupo,
+  target = lst_targets$incidencia_edad$value,
+  modelo = c(1.807, 5.952, 7.734, 29.972, 73.504, 140.639),
+  dif    = c(1.807, 5.952, 7.734, 29.972, 73.504, 140.639) - lst_targets$incidencia_edad$value
+)
+
+
+
+target_tramos <- c(1.919683, 7.734900, 21.530247, 53.850145, 122.156054, 218.402920)
+pop_ine_tramo <- c(6153716, 2695688, 2488314, 2222376, 1519974, 450362)
+pop_ine_total <- 19828563
+
+sum(target_tramos * pop_ine_tramo) / pop_ine_total
+
+
+lst_targets$incidencia
+str(lst_targets$incidencia)
+```
+
+```{r}
+#| label: CI for binomial - Clopper-Pearson
+
+##funcion para IC 95% binomial exacto para x éxitos de n ensayos
+ic_binom_exacto <- function(x, n, nivel = 0.95) {
+  a <- (1 - nivel) / 2
+  data.frame(lb = ifelse(x == 0, 0, qbeta(a,     x,     n - x + 1)),
+             ub = ifelse(x == n, 1, qbeta(1 - a, x + 1, n - x)))
+}
+```
+
+```{r}
+# 2. Estadios
+
+
+n_eff <-  485
+
+## MODIFICAR (nuevo): conteos del target y n de la verosimilitud (n_eff = 485)
+v_conteo_stg <- c(lst_targets$PropSick_estadio1$conteo,
+                  lst_targets$PropSick_estadio2$conteo,
+                  lst_targets$PropSick_estadio3$conteo,
+                  lst_targets$PropSick_estadio4$conteo)
+ic_stg <- ic_binom_exacto(v_conteo_stg, n_eff)
+
+df_stages <- data.frame(
+  estadio   = c("Est 1","Est 2","Est 3","Est 4"),
+  ## MODIFICAR: n_eff en vez de 485 escrito a mano
+  # target  = c(...) / 485,
+  target    = v_conteo_stg / n_eff,
+  modelo    = v_prop_mean,
+  lb        = m_prop_95[, 1],
+  ub        = m_prop_95[, 2],
+  ## MODIFICAR (nuevo): IC del target
+  target_lb = ic_stg$lb,
+  target_ub = ic_stg$ub
+)
+
+gg_stages <- ggplot(df_stages, aes(x = estadio)) +
+  
+  ## MODIFICAR (nuevo): IC del target, desplazado a la izquierda
+  geom_errorbar(aes(ymin = target_lb, ymax = target_ub),
+                width = 0.15, color = "gray50", linetype = "dashed",
+                position = position_nudge(x = -0.12)) +
+  
+  geom_point(aes(y = target), color = "black", size = 4, shape = 17,
+             position = position_nudge(x = -0.12)) +
+  
+  ## modelo con su IC de propagación, desplazado a la derecha
+  geom_errorbar(aes(ymin = lb, ymax = ub), width = 0.2, color = "steelblue",
+                position = position_nudge(x = 0.12)) +
+  
+  geom_point(aes(y = modelo), color = "steelblue", size = 4,
+             position = position_nudge(x = 0.12)) +
+  
+  labs(title = "Proporción de Estadios Clínicos",
+       ## MODIFICAR (nuevo): aclarar el n del IC
+       subtitle = "Triángulo negro = target (IC 95% exacto, n = 485); azul = modelo",
+       x = NULL, y = "Proporción") +
+  
+  theme_bw(base_size = 13)
+
+gg_stages
+```
+
+```{r}
+#| eval: false
+
+# 2. Estadios
+df_stages <- data.frame(
+  estadio = c("Est 1","Est 2","Est 3","Est 4"),
+  target  = c(lst_targets$PropSick_estadio1$conteo,
+              lst_targets$PropSick_estadio2$conteo,
+              lst_targets$PropSick_estadio3$conteo,
+              lst_targets$PropSick_estadio4$conteo) / 485,
+  modelo  = v_prop_mean,
+  lb      = m_prop_95[, 1],
+  ub      = m_prop_95[, 2]
+)
+
+gg_stages <- ggplot(df_stages, 
+                    aes(x = estadio)) +
+  
+  geom_errorbar(aes(ymin = lb, 
+                    ymax = ub), 
+                width = 0.2, 
+                color = "steelblue") +
+  
+  geom_point(aes(y = modelo), 
+             color = "steelblue", 
+             size = 4) +
+  
+  geom_point(aes(y = target),
+             color = "black", 
+             size = 4, 
+             shape = 17) +
+  
+  labs(title = "Proporción de Estadios Clínicos",
+       x = NULL, 
+       y = "Proporción") +
+  
+  theme_bw(base_size = 13)
+
+print(gg_stages)
+
+## deberia dar los 485
+with(lst_targets, PropSick_estadio1$conteo + PropSick_estadio2$conteo +
+                  PropSick_estadio3$conteo + PropSick_estadio4$conteo)
+```
+
+```{r}
+#| eval: true
+#| label: plot de prevalencia NormalGastritis
+
+
+ic_NG <- ic_binom_exacto(lst_targets$PrevNG_combined$conteo,
+                         lst_targets$PrevNG_combined$size)
+
+# 3. Prevalencias (4 facetas)
+tramos <- c("13-44",
+            "45-56",
+            "57-66",
+            "67-83")   # tramos Bellolio
+
+df_prevNG <- data.frame(
+  tramo  = factor(tramos, 
+                  levels = tramos),
+  target = lst_targets$PrevNG_combined$conteo / lst_targets$PrevNG_combined$size,
+  modelo = v_PrevNG_mean,
+  lb     = m_PrevNG_95[, 1],
+  ub     = m_PrevNG_95[, 2],
+  
+  ##  IC del target
+  target_lb = ic_NG$lb,
+  target_ub = ic_NG$ub
+)
+```
+
+```{r}
+gg_prevNG <- ggplot(df_prevNG, aes(x = tramo)) +
+  
+  ## MODIFICAR (nuevo): IC del target, desplazado a la izquierda
+  geom_errorbar(aes(ymin = target_lb, ymax = target_ub),
+                width = 0.15, color = "gray50", linetype = "dashed",
+                position = position_nudge(x = -0.12)) +
+  
+  geom_point(aes(y = target), color = "black", size = 3, shape = 17,
+             position = position_nudge(x = -0.12)) +
+  
+  geom_errorbar(aes(ymin = lb, ymax = ub), width = 0.2, color = "steelblue",
+                position = position_nudge(x = 0.12)) +
+  
+  geom_point(aes(y = modelo), color = "steelblue", size = 3,
+             position = position_nudge(x = 0.12)) +
+  
+  labs(title = "Prevalencia Normal-Gastritis (OLGA-0) por tramo",
+       ## MODIFICAR (nuevo)
+       subtitle = "Triángulo negro = target (IC 95% exacto, n Bellolio); azul = modelo",
+       x = "Tramo etario", y = "Prevalencia") +
+  
+  theme_bw(base_size = 13)
+
+
+gg_prevNG
+```
+
+```{r}
+#| eval: false
+
+gg_prevNG <- ggplot(df_prevNG, 
+                    aes(x = tramo)) +
+  
+  geom_errorbar(aes(ymin = lb,
+                    ymax = ub), 
+                width = 0.2, 
+                color = "steelblue") +
+  
+  geom_point(aes(y = modelo),
+             color = "steelblue", 
+             size = 3) +
+  
+  geom_point(aes(y = target), 
+             color = "black", 
+             size = 3, 
+             shape = 17) +
+  
+  labs(title = "Prevalencia Normal-Gastritis (OLGA-0) por tramo", 
+       x = "Tramo etario", 
+       y = "Prevalencia") +
+  
+  theme_bw(base_size = 13)
+
+print(gg_prevNG)
+```
+
+```{r}
+# 3b. Metaplasia, displasia, atrofia Hp+/Hp-: puntos únicos.
+# target en logit -> transformar a proporción con expit para comparar visualmente
+expit <- function(x) 1 / (1 + exp(-x))
+
+df_prev_punto <- data.frame(
+  
+  tipo   = c("Metaplasia", "Displasia", "Atrofia Hp+", "Atrofia Hp-"),
+  
+  target = c(expit(lst_targets$PrevI_combined$logit_pred),
+             expit(lst_targets$PrevD_combined$logit_pred),
+             expit(lst_targets$PrevA_hpp$logit_pred),
+             expit(lst_targets$PrevA_hpn$logit_pred)),
+  
+  modelo = c(PrevI_mean, 
+             PrevD_mean, 
+             PrevA_hpp_mean, 
+             PrevA_hpn_mean),
+  
+  lb     = c(PrevI_95[1], 
+             PrevD_95[1], 
+             PrevA_hpp_95[1], 
+             PrevA_hpn_95[1]),
+  
+  ub     = c(PrevI_95[2], 
+             PrevD_95[2], 
+             PrevA_hpp_95[2], 
+             PrevA_hpn_95[2])
+)
+# banda del target en proporción (IC del logit -> expit), como referencia
+df_prev_punto$target_lb <- c(
+  expit(lst_targets$PrevI_combined$logit_pred - 1.96*lst_targets$PrevI_combined$sd_logit),
+  expit(lst_targets$PrevD_combined$logit_pred - 1.96*lst_targets$PrevD_combined$sd_logit),
+  expit(lst_targets$PrevA_hpp$logit_pred      - 1.96*lst_targets$PrevA_hpp$sd_logit),
+  expit(lst_targets$PrevA_hpn$logit_pred      - 1.96*lst_targets$PrevA_hpn$sd_logit)
+)
+df_prev_punto$target_ub <- c(
+  expit(lst_targets$PrevI_combined$logit_pred + 1.96*lst_targets$PrevI_combined$sd_logit),
+  expit(lst_targets$PrevD_combined$logit_pred + 1.96*lst_targets$PrevD_combined$sd_logit),
+  expit(lst_targets$PrevA_hpp$logit_pred      + 1.96*lst_targets$PrevA_hpp$sd_logit),
+  expit(lst_targets$PrevA_hpn$logit_pred      + 1.96*lst_targets$PrevA_hpn$sd_logit)
+)
+
+gg_prev_punto <- ggplot(df_prev_punto, 
+                        aes(x = tipo)) +
+  
+  # banda del target (ancha, refleja la incertidumbre de la metarregresión)
+  geom_errorbar(aes(ymin = target_lb,
+                    ymax = target_ub), 
+                width = 0.15,
+                color = "gray50",
+                linetype = "dashed") +
+  
+  geom_point(aes(y = target), 
+             color = "black", 
+             size = 3, 
+             shape = 17) +
+  
+  # modelo con su IC de propagación
+  geom_errorbar(aes(ymin = lb, 
+                    ymax = ub), 
+                width = 0.2, 
+                color = "steelblue") +
+  
+  geom_point(aes(y = modelo), 
+             color = "steelblue", 
+             size = 3) +
+  
+  labs(title = "Prevalencias preneoplásicas (punto nacional)",
+       subtitle = "Triángulo negro = target; banda gris punteada = IC target; azul = modelo",
+       x = NULL, 
+       y = "Prevalencia") +
+  
+  theme_bw(base_size = 13) +
+  
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+print(gg_prev_punto)
+```
+
+```{r}
+## ------- Prior vs Posterior por cadena (diagnóstico de convergencia) ------- ##
+
+## 1. Prior (mismo muestreo que el bloque combinado)
+set.seed(1989)
+m_samp_prior <- sample_prior(n_total)
+
+df_prior_ch <- as.data.frame(m_samp_prior) %>%
+  mutate(Distribucion = "Prior")
+
+## 2. Posterior de cada cadena por separado (color distinto)
+df_post_ch <- purrr::imap_dfr(l_cadenas_imis, function(x, i) {
+  as.data.frame(x$m_calib_res[, v_param_names]) %>%
+    mutate(Distribucion = paste0("Cadena ", i))
+})
+
+## 3. Combinar y pasar a formato largo
+df_prior_post_ch <- bind_rows(df_prior_ch, df_post_ch) %>%
+  pivot_longer(cols = -Distribucion,
+               names_to = "Parametro",
+               values_to = "valor")
+
+## orden de factores: prior primero (dibujado abajo), cadenas encima
+df_prior_post_ch$Distribucion <- factor(
+  df_prior_post_ch$Distribucion,
+  levels = c("Prior", "Cadena 1", "Cadena 2", "Cadena 3", "Cadena 4")
+)
+
+## 4. Gráfico
+gg_prior_post_ch <- ggplot(df_prior_post_ch,
+                           aes(x = valor,
+                               fill = Distribucion,
+                               color = Distribucion)) +
+
+  geom_density(alpha = 0.25, aes(y = after_stat(scaled))) +
+
+  facet_wrap(~ Parametro, scales = "free", ncol = 4) +
+
+  scale_fill_manual(values = c(
+    "Prior"    = "gray60",
+    "Cadena 1" = "#E41A1C",
+    "Cadena 2" = "#377EB8",
+    "Cadena 3" = "#4DAF4A",
+    "Cadena 4" = "#984EA3"
+  )) +
+
+  scale_color_manual(values = c(
+    "Prior"    = "gray40",
+    "Cadena 1" = "#E41A1C",
+    "Cadena 2" = "#377EB8",
+    "Cadena 3" = "#4DAF4A",
+    "Cadena 4" = "#984EA3"
+  )) +
+
+  labs(
+    title    = "Prior vs Posterior por cadena",
+    subtitle = "Gris = prior | colores = posterior de cada cadena IMIS (convergencia si se superponen)",
+    x        = "Valor del parámetro",
+    y        = "Densidad escalada",
+    fill     = NULL, color = NULL
+  ) +
+
+  theme_bw(base_size = 11) +
+
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold", size = 9))
+
+print(gg_prior_post_ch)
+
+```
+
+```{r}
+#| eval: true
+
+
+## ------- 1. Muestrear del prior ------- ##
+
+set.seed(1989)
+m_samp_prior <- sample_prior(n_total)  # mismo n que la posterior combinada
+
+## ------- 2. Armar dataframe largo prior vs posterior ------- ##
+
+df_prior <- as.data.frame(m_samp_prior) %>%
+  mutate(Distribucion = "Prior")
+
+df_post <- as.data.frame(m_calib_res[, v_param_names]) %>%
+  mutate(Distribucion = "Posterior")
+
+df_prior_post <- bind_rows(df_prior, df_post) %>%
+  pivot_longer(cols = -Distribucion,
+               names_to = "Parametro",
+               values_to = "valor")
+
+# orden de factores (posterior encima)
+df_prior_post$Distribucion <- factor(df_prior_post$Distribucion,
+                                     levels = c("Prior", "Posterior"))
+
+## ------- 3. Gráfico ------- ##
+
+gg_prior_post <- ggplot(df_prior_post,
+                        aes(x = valor,
+                            fill = Distribucion, 
+                            color = Distribucion)) +
+  
+  geom_density(alpha = 0.4, aes(y = after_stat(scaled))) +
+  
+  facet_wrap(~ Parametro, scales = "free", ncol = 4) +
+  
+  scale_fill_manual(values  = c("Prior" = "gray60", "Posterior" = "steelblue")) +
+  
+  scale_color_manual(values = c("Prior" = "gray40", "Posterior" = "steelblue4")) +
+  
+  labs(
+    title    = "Distribuciones Prior vs Posterior por parámetro",
+    subtitle = "Posterior más estrecha que prior → parámetro informado por los datos",
+    x        = "Valor del parámetro",
+    y        = "Densidad escalada",
+    fill     = NULL, color = NULL
+  ) +
+  
+  theme_bw(base_size = 11) +
+  
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold", size = 9))
+
+print(gg_prior_post)
+```
+
+```{r}
+#| eval: true
+
+
+df_marglike <- purrr::imap_dfr(l_cadenas_imis, function(x, i) {
+  marglike <- x$fit_imis$stat[, 1]   # columna 1 = MargLike
+  data.frame(
+    cadena    = paste0("Cadena ", i),
+    iteracion = seq_along(marglike),
+    loglik    = marglike
+  )
+})
+
+gg_marglike <- ggplot(df_marglike, aes(x = iteracion, y = loglik, color = cadena)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_brewer(palette = "Set1") +
+  #scale_x_continuous(breaks = 1:max(df_marglike$iteracion)) +
+  labs(
+    title    = "Convergencia del algoritmo IMIS",
+    subtitle = "Log-verosimilitud marginal por iteración (estabilización → convergencia)",
+    x        = "Iteración de IMIS",
+    y        = "Log-verosimilitud marginal (MargLike)",
+    color    = "Cadena"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "bottom")
+
+print(gg_marglike)
+```
+
+```{r}
+#| eval: true
+
+tramos <- c(
+  "p.NnGn_t1", "p.NnGn_t2", "p.NnGn_t3", "p.NnGn_t4",
+  "p.NpGp_t1", "p.NpGp_t2", "p.NpGp_t3", "p.NpGp_t4",
+  "p.D1p_t1","p.D1p_t2","p.D1p_t3","p.D1p_t4",
+  "p.ID_t1", "p.ID_t2", "p.ID_t3", "p.ID_t4",
+  "p.AI_t1", "p.AI_t2", "p.AI_t3", "p.AI_t4")
+
+for (p in tramos) {
+  a <- v_alpha[p]; b <- v_beta[p]
+  prior_q975 <- qbeta(0.975, a, b)          # borde superior efectivo del prior
+  prior_max  <- qbeta(0.999, a, b)          # cola extrema del prior
+  post       <- m_calib_res[, p]            # posterior de ese tramo
+  post_q975  <- quantile(post, 0.975)
+  post_max   <- max(post)
+  frac_sobre <- mean(post > prior_q975)     # % de posterior más allá del borde del prior
+
+  cat(sprintf(
+    "%s | prior q97.5 = %.4f (q99.9 = %.4f) | post q97.5 = %.4f, max = %.4f | %% post > prior_q97.5 = %.1f%%\n",
+    p, prior_q975, prior_max, post_q975, post_max, 100*frac_sobre
+  ))
+}
+```
+
+```{r}
+#| eval: true
+
+
+df_max_acum <- purrr::imap_dfr(l_cadenas_imis, function(x, i) {
+  loglik <- x$m_calib_res[, "Overall_fit"]
+  data.frame(
+    cadena        = paste0("Cadena ", i),
+    muestra       = seq_along(loglik),
+    max_acumulado = cummax(loglik)
+  )
+})
+
+gg_max_acum <- ggplot(df_max_acum, aes(x = muestra, y = max_acumulado, color = cadena)) +
+  geom_line(linewidth = 1) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title    = "Máximo acumulado de log-verosimilitud",
+    subtitle = "Sobre las 35.000 muestras posteriores por cadena",
+    x        = "Número de muestra (1 a 35.000)",
+    y        = "Log-verosimilitud máxima acumulada",
+    color    = "Cadena"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "bottom")
+
+print(gg_max_acum)
+```

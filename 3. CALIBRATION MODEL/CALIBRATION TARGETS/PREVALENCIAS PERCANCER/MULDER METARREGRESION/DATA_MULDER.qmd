@@ -1,0 +1,168 @@
+---
+title: "DATA_MULDER"
+format: html
+editor: visual
+---
+
+```{r}
+library(readr)
+library(tidyverse)
+```
+
+```{r}
+#| eval: false
+GastricCancerIncidence <- read_csv("GastricCancerIncidence_2.csv")
+ChileGastricCancerIncidence <- read_csv("data_chile.csv") %>% 
+  filter(Country == "Chile")
+```
+
+```{r}
+#| label: carga de datos
+#| eval: true
+
+## Targets de prevalencia -metaplasia, displasia- desde metarregresión Mulder
+## Datos de entrada: incidencia ASR de Chile (escala GLOBOCAN/Segi), desde estimacion de P. Zitko 
+## Salida: RDS para calibración
+## Verosimilitud objetivo: NORMAL en escala LOGIT (predictiva: SE coef + tau^2) -> elementos para la verosimilitud en caliobracion
+## NOTA: covarianza intercepto-pendiente NO incluida (no disponible) -> sd levemente subestimado
+
+
+## incidencia x (ASR de Chile)
+## debe estar en la MISMA escala que el eje de Mulder: ASR, estándar mundial (Segi), todas las edades
+x_eval <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/INCIDENCIA CANCER/CG_estimacion_asr.rds") |> 
+ filter(Ano == 2022) # <-- AJUSTAR ruta; o asignar a mano temporalmente
+
+x_eval <- as.numeric(x_eval[1,2])
+stopifnot(length(x_eval) == 1, is.finite(x_eval)) ## detener si el tamaño de x_eval es diferente de 1 y no es finito.
+# x_eval = 11.9479
+```
+
+```{r}
+#| eval: true
+#| label: reconstruccion de metarregresion
+
+
+## Coeficientes de las metarregresiones vs incidencia (escala logit) ----
+## Mulder 2024, output 'regression_im1' / 'regression_dys1' (vs GC_incidence)
+## se   = error estándar del coeficiente 
+## tau2 = heterogeneidad residual (ML)
+
+## lista con coeficientes de metarregresion:
+coef_mr <- list(
+  
+  # metaplasia (IM-incidence, k=95, página 3 de outputs)
+  PrevI_combined = list(  
+    
+    # intercepto
+    b0 = -2.0128, se_b0 = 0.1359,
+    
+    # predictor
+    b1 =  0.0333, se_b1 = 0.0094,
+    
+    tau2 = 0.6002,
+    
+    fuente = "Mulder regression_im1"
+  ),
+  
+  
+  # displasia (Dys-GC incidence, k=36, página 5 de outputs)
+  PrevD_combined = list(  
+    
+    # intercepto
+    b0 = -4.9738, se_b0 = 0.3863,
+    
+    # predictor
+    b1 =  0.0637, se_b1 = 0.0285,
+    
+    tau2 = 1.3621,
+    
+    fuente = "Mulder regression_dys1"
+  ),
+  
+  
+  # atrofia (AG- incidence, k = 84, pag 1 de outputs)
+  PrevAtr_combined = list(
+    
+    # intercepto
+    b0 = -2.1058, se_b0 = 0.2870,
+    
+    # predidctor
+    b1 = 0.0497, se_b1 = 0.0187,
+    
+    tau2 = 2.2010,
+    
+    fuente = "Mulder regression_ag1"
+  )
+  
+)
+```
+
+```{r}
+#| eval: true
+#| label: calculo de predichos
+
+## Funciones para calculo de predichos
+
+## funcion expit()
+expit <- function(x) 1 / (1 + exp(-x))
+
+prev_mr <- function(par,
+                    x, 
+                    incluir_tau2 = TRUE) {
+  
+  ## calculo del log pred
+  logit_pred <- par$b0 + par$b1 * x
+  
+  # incertidumbre de la curva (SIN covarianza en b0 y b1(sobrestimada?))
+  var_linea <- par$se_b0^2 + x^2 * par$se_b1^2        
+  
+  # heterogeneidad entre estudios alrededor de la línea.
+  var_tau2  <- if (incluir_tau2) par$tau2 else 0  
+  
+  sd_logit  <- sqrt(var_linea + var_tau2)
+
+  list(
+    logit_pred = logit_pred,                          #  media para (calc_log_lik)
+    sd_logit   = sd_logit,                            #  sd para (calc_log_lik)
+    prev       = expit(logit_pred),                   # punto en proporción 
+    ic_lb      = expit(logit_pred - 1.96 * sd_logit), # banda en proporción
+    ic_ub      = expit(logit_pred + 1.96 * sd_logit),
+    x_eval     = x,
+    var_linea  = var_linea,                           # aporte de la línea
+    var_tau2   = var_tau2,                            # aporte de tau^2
+    fuente     = par$fuente
+  )
+}
+```
+
+```{r}
+#| eval: true
+#| label: calcular
+
+
+## calculo
+prev_targets_mr <- lapply(coef_mr,     ## par
+                          prev_mr,     ## función
+                          x = x_eval)  ## incidencia input
+```
+
+```{r}
+#| eval: true
+#| label: resultados
+
+## rev results
+cat("x_eval (ASR) =", x_eval, "\n\n")
+for (nm in names(prev_targets_mr)) {
+  r <- prev_targets_mr[[nm]]
+  cat(sprintf("%-16s prev = %.4f  [%.4f, %.4f]   logit = %.3f  sd_logit = %.3f   (var_linea %.3f / tau2 %.3f)\n",
+              nm, r$prev, r$ic_lb, r$ic_ub, r$logit_pred, r$sd_logit, r$var_linea, r$var_tau2))
+}
+```
+
+```{r}
+#| eval: true
+#| label: guardar resultados
+
+ 
+saveRDS(prev_targets_mr, "prev_targets_mulder.rds") 
+```

@@ -1,0 +1,239 @@
+---
+title: "CANCERES_HOSPITALARIOS"
+author: "CFP. Biostatician, M.Sc."
+format:
+  html:
+   embed-resources: true   # add to html file tables and figures
+editor: visual
+bibliography: packages.bib # bibliography file with the packages used in this analysis
+nocite: '@*'               # add bibliography in the last title, and no in the text (@ format)
+---
+
+```{r}
+#| label: clean session
+#| include: false
+
+rm(list = ls()); gc()
+```
+
+```{r}
+#| label: libraries
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(gtsummary)
+```
+
+```{r}
+#| label: load data
+#| echo: false
+#| eval: false
+
+RHC <- readr::read_delim("RHC_DEF_20251303.csv",
+                  delim = "|", 
+                  escape_double = FALSE,
+                  locale = locale(encoding = "ISO-8859-1"),
+                  trim_ws = TRUE)
+
+saveRDS(RHC, file = "RHC.rds")
+```
+
+```{r}
+#| eval: true
+
+RHC <- readRDS("RHC.rds")
+```
+
+```{r}
+#| label: data administration
+
+RHC_CG <- RHC %>% 
+  dplyr::filter(TOPOGRAFIA_CIE10 == "C16", ## cancer gastrico
+                EDAD > 29) %>%             ## mayores de 29
+  dplyr::mutate(
+    QUINQUENIO_EDAD  = cut(EDAD,
+                            breaks = c(30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, Inf),
+                            labels = c( "30-34", "35-39", "40-44", "45-49","50-54", 
+                                        "55-59", "60-64", "65-69", "70-74", "75-79", 
+                                        "80 y más"),
+                            right = FALSE))
+```
+
+```{r}
+#| label: resumen df
+
+
+RESUMEN_RHC_CG <- RHC_CG %>% 
+  
+  group_by(ESTADIO, EDAD, QUINQUENIO_EDAD) %>% 
+  
+  summarise(casos = n(),
+            .groups = "drop") %>% 
+  
+  group_by(ESTADIO, QUINQUENIO_EDAD) %>% 
+  
+  mutate(casos_estadio_qq = sum(casos)) %>% 
+  
+  ungroup() %>% 
+  
+  group_by(ESTADIO) %>% 
+  
+  mutate(casos_estadio = sum(casos),
+         tipo_estadio = case_when(
+           ESTADIO == "99" ~ "Sin estadio",
+           TRUE            ~ "Con estadio"
+          ))
+```
+
+```{r}
+#| label: plot data
+#| fig-width: 12
+#| fig-heigh: 8
+
+ggplot(
+  data    = RESUMEN_RHC_CG,
+  mapping = aes(
+    x        = EDAD,
+    y        = casos,
+    color    = ESTADIO) ) +
+  
+  geom_line(linewidth = 1) +          
+  
+  facet_wrap( ~ tipo_estadio) +
+  
+  scale_x_continuous(
+    limits = c(30, 102),
+    breaks = seq(30, 102, 5)
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0, 115),
+    breaks = seq(0, 115, 10),
+    labels = scales::label_number(big.mark = ".", decimal.mark = ",")
+  ) +
+  
+  theme_light() +                  
+  
+  labs(
+    title   = "Distribución de Casos por Edad y Estadio",
+    x       = "Edad (años)",
+    y       = "Número de Casos",
+    color   = "Estadio",
+    caption = "Información proveniente de los registros hospitalarios de cáncer." 
+  ) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0, margin = margin(b = 10)),
+    strip.text = element_text(size = 12, face = "bold")
+  )
+
+# ggsave(plot = last_plot(), file = "incidencia_por_estadio.png", width = 12, height = 8)
+```
+
+```{r}
+#| label: reconstrucción ESTADIOS == 99
+#| eval: false
+
+
+n_RHC_CG <- RHC_CG %>% 
+  mutate(ESTADIO = as.character(ESTADIO)
+         ) %>% 
+  
+  filter(
+    
+    # mantener solo casos con estadios = 99
+    ESTADIO        == "99",        
+    
+    # quitar casos con información desconocida en todas las variables TNM
+    !(T_TUMOR      == "X" &        
+      N_GANGLIO    == "X" & 
+      M_METASTASIS == "X"),
+    
+    # quitar casos sin información en todas las variables TNM
+    !(T_TUMOR      == "99" &        
+      N_GANGLIO    == "99" & 
+      M_METASTASIS == "99"),
+    
+         ) %>%              
+  
+  # reconstruir estadios a partir de M_METASTASIS == "1"
+  mutate(n_ESTADIO = 
+           if_else(M_METASTASIS %in% "1","IV", ESTADIO)
+         ) %>%
+  
+  # mantener n_ESTADIO  == "99" 
+  filter(n_ESTADIO == "99") %>%
+  
+  # agrupar por combinacion de TNM presente en el df
+  group_by(T_TUMOR, N_GANGLIO, M_METASTASIS) %>%
+  
+  # numero de casos por cada combinacion existente
+  summarise(Frecuencia = n(), .groups = "drop") %>%
+  
+  # ordenar combinaciones segun frecuencia
+  arrange(desc(Frecuencia), T_TUMOR, N_GANGLIO)
+
+
+print(n_RHC_CG )
+```
+
+```{r}
+#| eval: false
+#| 
+library(openxlsx)
+
+# Guardar tu dataframe como un archivo de Excel
+write.xlsx(n_RHC_CG, 
+           file = "COMBINACIONES_TNM.xlsx", 
+           asTable = TRUE, 
+           headerStyle = createStyle(textDecoration = "BOLD", 
+                                     fontColour     = "#FFFFFF", 
+                                     fgFill         = "#1F4E78"))
+```
+
+```{r}
+#| label: calculo de prevalencias por estadio
+#| eval: true
+
+prev_RHC_CG <- RHC_CG %>% 
+  mutate(ESTADIO = as.character(ESTADIO)) %>% 
+
+  
+  # reconstruir estadios a partir de M_METASTASIS == "1"
+  mutate(n_ESTADIO = 
+           if_else(M_METASTASIS %in% "1","IV", ESTADIO)
+         ) %>%
+  
+  # mantener n_ESTADIO  != "99" 
+  filter(n_ESTADIO != "99") %>% 
+  
+    # agrupar por combinacion de TNM presente en el df
+  group_by(n_ESTADIO) %>%
+  
+  # numero de casos por cada combinacion existente
+  summarise(Frecuencia  = n(),
+            .groups = "drop") %>%
+  
+  mutate(Prevalencia = Frecuencia / sum(Frecuencia)) %>%
+  
+  # ordenar combinaciones segun frecuencia
+  arrange(desc(Frecuencia), n_ESTADIO)
+```
+
+```{r}
+#| label: verificaciones
+#| eval: true
+
+
+## valores de M: confirmar que M1 está codificado solo como "1" (sin "1a", "1b", etc.)
+table(RHC_CG$M_METASTASIS, useNA = "ifany")
+
+## valores de estadio: confirmar la codificación (I-IV vs 1-4, "0", subestadios)
+table(RHC_CG$ESTADIO, useNA = "ifany")
+
+prev_RHC_CG                                   # revisar estadios y frecuencias
+stopifnot(nrow(prev_RHC_CG) == 4)             # exactamente 4 estadios (I-IV); falla si hay "4" e "IV", "0", subestadios, etc.
+sum(prev_RHC_CG$Frecuencia)                   # nuevo total: reemplaza total_obs (5648) en el script de calibración
+
+saveRDS(prev_RHC_CG, "prev_calib_target.rds")
+```

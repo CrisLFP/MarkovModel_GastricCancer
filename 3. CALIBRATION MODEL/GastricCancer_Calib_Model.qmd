@@ -1,0 +1,1578 @@
+---
+title: "GastricCancer_Calib_Model"
+author: "CFP. Biostatician, M.Sc.; Adapted from DARTH workgroup"
+format:
+  html:
+   embed-resources: true   # add to html file tables and figures
+editor: visual
+bibliography: packages.bib # bibliography file with the packages used in this analysis
+nocite: '@*'               # add bibliography in the last title, and no in the text (@ format)
+---
+
+```{r}
+#| label: clean session
+#| include: false
+#| eval: true
+
+rm(list = ls()); gc()
+```
+
+The following CRAN libraries were used to conduct the statistical analysis and generate the summary tables and figures for this manuscript. See the references at the end.
+
+```{r}
+#| eval: true
+#| label: libraries
+
+
+# calibration functionality
+library(lhs)
+
+# visualization
+library(ggplot2)
+library(plotrix)
+library(psych)
+library(scatterplot3d)
+library(IMIS)
+library(dplyr)
+library(matrixStats)
+library(GGally)
+library(tidyverse)
+```
+
+```{r}
+#| eval: true
+#| label: load target data
+
+
+# tasa de incidencia estandarizada, por pob ASR a partir de estimaciones - P Zitko
+rate <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/INCIDENCIA CANCER/serie_CG_estimacion_asr.rds") 
+incidence_target <-  rate %>% 
+  filter(Ano %in% 2022) %>% 
+  select(ASR_determinista,
+       ASR_LI95,
+       ASR_LS95,
+       ASR_sd)
+
+#######################################
+
+# incidencia por grupo etario CG - P Zitko. Incluye IC95% empírico
+rate_age <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/INCIDENCIA CANCER/CG_estimacion_edad.rds")
+
+#######################################
+
+# proporcion de casos de CG por estadios - RHC
+stages_target <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/REGISTRO HOSPITALARIO DE CANCER/prev_calib_target.rds")
+
+## renombrar estadios
+stages_target <- stages_target %>% 
+  mutate(estadio = forcats::fct_recode(n_ESTADIO,
+                              "1clinical"   = "I",
+                              "2clinical"   = "II",
+                              "3clinical"   = "III",
+                              "4clinical"   = "IV"))
+
+#######################################
+
+# Prevalencia pre-cáncer states, a partir de tasa de incidencia estandariza pob ASR - metarregresión
+pre_cancer_prev_target <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/PREVALENCIAS PERCANCER/MULDER METARREGRESION/prev_targets_mulder.rds") 
+
+
+#######################################
+
+# Prevalencia pre-cáncer states, by hpylori state
+# hpylori_prev_target <- readRDS("PREVALENCES_PRECANCER/DESCOMPOSICION_PREVALENCIA/prev_helicobacter.rds")
+hpylori_prev_target <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/3. CALIBRATION MODEL/CALIBRATION TARGETS/PREVALENCIAS PERCANCER/DESCOMPOSICION_PREVALENCIA/prev_helicobacter_mulder.rds")
+
+#######################################
+
+## for binomial distribution
+# n_patients <- 290410
+# n_studies  <- 116
+# n_size = round(n_patients/n_studies, 0)
+```
+
+```{r}
+#| eval: true
+#| label: carga de targets
+
+## crear lista de targets de calibración 
+lst_targets <- list()
+
+
+# TARGET 1: incidencia general de cáncer gástrico 2022 - Zitko
+lst_targets$incidencia <- list(value = as.numeric(incidence_target$ASR_determinista),
+                               sd    = as.numeric(incidence_target$ASR_sd),
+                               ic_lb = as.numeric(incidence_target$ASR_LI95),
+                               ic_ub = as.numeric(incidence_target$ASR_LS95))
+
+                
+# TARGET 2: incidencia (Vector de 6 tramos etarios) - Zitko. 
+lst_targets$incidencia_edad <-list(grupo = rate_age$GrupoEdad,
+                                   value = rate_age$Incidencia,
+                                  # Construccion de sd a partir de IC95%
+                                   sd    = (rate_age$IC_Upper - rate_age$IC_Lower) / (2*1.96),
+                                   ic_lb = rate_age$IC_Lower,
+                                   ic_ub = rate_age$IC_Upper
+                                   )
+
+
+# TARGET 3: Estadios de Cáncer (Conteos para Multinomial) - RHC + Bellolio
+n_eff         <- 485                             ## n de sujetos Bellolio  
+total_obs     <- sum(stages_target$Frecuencia)   ## n casos por estadio 5648
+factor_escala <- n_eff / total_obs
+
+lst_targets$PropSick_estadio1 <- list(conteo = round(stages_target$Frecuencia[stages_target$estadio == "1clinical"] * factor_escala))
+lst_targets$PropSick_estadio2 <- list(conteo = round(stages_target$Frecuencia[stages_target$estadio == "2clinical"] * factor_escala))
+lst_targets$PropSick_estadio3 <- list(conteo = round(stages_target$Frecuencia[stages_target$estadio == "3clinical"] * factor_escala))
+lst_targets$PropSick_estadio4 <- list(conteo = round(stages_target$Frecuencia[stages_target$estadio == "4clinical"] * factor_escala))
+
+
+# TARGET 4: Prevalencias Preneoplásicas: Gastritis (Binomial, por tramo etario) - Bellolio
+lst_targets$PrevNG_combined <- list(conteo = c(110, 87, 75, 56),     ## casos olga 0 tramo etario
+                                    size   = c(121, 125, 125, 114))  ## pacientes por tramo etario
+
+
+# TARGET 5: Prevalencias Preneoplásicas: Atrofia, metaplasia, displasia - a partir de output de Metarregresion, Mulder 2024
+lst_targets$PrevI_combined <- list(
+  logit_pred = pre_cancer_prev_target$PrevI_combined$logit_pred,
+  sd_logit   = pre_cancer_prev_target$PrevI_combined$sd_logit
+)
+
+lst_targets$PrevD_combined <- list(
+  logit_pred = pre_cancer_prev_target$PrevD_combined$logit_pred,
+  sd_logit   = pre_cancer_prev_target$PrevD_combined$sd_logit
+)
+
+lst_targets$PrevA_hpp <- list(
+  logit_pred = hpylori_prev_target$PrevA_hpp$logit_pred,
+  sd_logit   = hpylori_prev_target$PrevA_hpp$sd_logit
+)
+
+lst_targets$PrevA_hpn <- list(
+  logit_pred = hpylori_prev_target$PrevA_hpn$logit_pred,
+  sd_logit   = hpylori_prev_target$PrevA_hpn$sd_logit
+)
+
+## recordr que es un mismo target (atrofia) pero descompuesto
+lst_targets$PrevA_hpp$sd_logit <- lst_targets$PrevA_hpp$sd_logit * sqrt(2)
+lst_targets$PrevA_hpn$sd_logit <- lst_targets$PrevA_hpn$sd_logit * sqrt(2)
+
+str(lst_targets) ## verifciacion de targets de calibracion!!!
+```
+
+# plot targets
+
+```{r}
+#| eval: true
+#| label: plot Gastric Cancer Incidence
+
+
+# 1 Gastric Cancer Incidence by age group
+plot_rate_age <- ggplot(data = rate_age,
+                        aes(
+                          y = Incidencia,
+                          x = GrupoEdad,
+                          group = 1)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(
+    ymin = IC_Lower,
+    ymax = IC_Upper,
+    width = 0.2
+  )) +
+  theme_minimal() +
+  labs(
+    y       = "Incidence rate x 100000 habs",
+    x       = "Age group",
+    caption = "Data collected from P Zitko GC incidence estimations for Chile",
+    title   = "Gastric Cancer Incidence Rate for age group, 2022" 
+  )
+
+plot_rate_age
+
+# ggsave(filename = "inc_tramos_target.png", plot = get_last_plot())
+
+
+####################################################
+```
+
+
+```{r}
+#| label: plot Gastric Cancer prevalence by stage
+
+# 2. Gastric Cancer prevalence by stage
+plot_prev_stage <- ggplot(data = stages_target,
+                        aes(
+                          y = Prevalencia,
+                          x = n_ESTADIO)) +
+  geom_col() +
+  theme_minimal() +
+  labs(
+    y       = "Prevalence x 100000 habs",
+    x       = "Gastric Cancer Satge",
+    caption = "Data collected from Hospital Cancer Registry",
+    title   = "Gastric Cancer Prevalence per Disease Stage at Diagnosis" 
+  )
+
+plot_prev_stage
+
+# ggsave(filename = "prev_estadios_target.png", plot = get_last_plot())
+
+
+#######################################################
+```
+
+
+```{r}
+#| label: plot Pre-neoplasic incidence
+
+## 3. Pre-neoplasic incidence
+
+df_targets_prev <- do.call(rbind, lapply(names(pre_cancer_prev_target), function(nm) {
+  x <- pre_cancer_prev_target[[nm]]
+  data.frame(
+    indicador = nm,
+    prev      = x$prev,
+    ic_lb     = x$ic_lb,
+    ic_ub     = x$ic_ub,
+    fuente    = x$fuente
+  )
+}))
+
+
+## etiquetas legibles y orden de la cascada de progresión
+df_targets_prev$estado <- factor(
+  df_targets_prev$indicador,
+  levels = c("PrevAtr_combined", "PrevI_combined", "PrevD_combined"),
+  labels = c("Atrophy", "Intestinal metaplasia", "Dysplasia")
+)
+
+plot_prev_precancer <- ggplot(data = df_targets_prev,
+                              aes(
+                                y = prev,
+                                x = estado)) +
+  geom_point() +
+  geom_errorbar(aes(
+    ymin = ic_lb,
+    ymax = ic_ub),
+    width = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+
+  theme_minimal() +
+  labs(
+    y       = "Prevalence (95% CI)",
+    x       = "Precancerous stage",
+    caption = "Data estimated from Mulder meta-regression",
+    title   = "Prevalence of gastric precancerous lesions"
+  )
+
+plot_prev_precancer
+
+# ggsave(filename = "prev_preneoplasia_target.png", plot = get_last_plot(), width = 8, height = 5)
+
+
+###########################################
+```
+
+
+```{r}
+#| label: plot H. pylori prevalence
+
+
+## 4. H. pylori prevalence
+
+df_targets_hp <- do.call(rbind, lapply(names(hpylori_prev_target), function(nm) {
+  x <- hpylori_prev_target[[nm]]
+  data.frame(
+    indicador = nm,
+    prev      = x$prev,
+    ic_lb     = x$ic_lb,
+    ic_ub     = x$ic_ub
+  )
+}))
+
+
+df_targets_hp$estado <- factor(
+  df_targets_hp$indicador,
+  levels = c("PrevA_hpp", "PrevA_hpn"),
+  labels = c("Atrophy Hp+", "Atrophy Hp-")
+)
+
+
+plot_prev_hp <- ggplot(data = df_targets_hp,
+                       aes(
+                         y = prev,
+                         x = estado)) +
+  geom_point() +
+  geom_errorbar(aes(
+    ymin = ic_lb,
+    ymax = ic_ub),
+    width = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal() +
+  labs(
+    y       = "Prevalence (95% CI)",
+    x       = "H. pylori status",
+    caption = "Data estimated from Mulder meta-regression, decomposed by H. pylori status, \nusing Ferrecio (2007) estimated infection prevalence in Chile",
+    title   = "Prevalence of gastric atrophy by H. pylori status"
+  )
+
+plot_prev_hp
+
+# ggsave(filename = "prev_prev_hp_target.png", plot = get_last_plot(), width = 8, height = 5)
+
+###############################################
+```
+
+
+```{r}
+#| label: plot OLGA
+
+
+## 5. plot OLGA
+
+v_conteo <- lst_targets$PrevNG_combined$conteo
+v_size   <- lst_targets$PrevNG_combined$size
+
+df_targets_NG <- data.frame(
+  tramo  = factor(c("13-44", "45-56", "57-66", "67-83"),
+                  levels = c("13-44", "45-56", "57-66", "67-83")),
+  conteo = v_conteo,
+  size   = v_size,
+  prev   = v_conteo / v_size
+)
+
+
+## IC exacto binomial 
+v_ic <- mapply(function(x, n) binom.test(x, n)$conf.int, v_conteo, v_size)
+df_targets_NG$ic_lb <- v_ic[1, ]
+df_targets_NG$ic_ub <- v_ic[2, ]
+
+
+
+plot_prev_NG <- ggplot(data = df_targets_NG,
+                       aes(
+                         y = prev,
+                         x = tramo)) +
+  geom_point() +
+  geom_errorbar(aes(
+    ymin = ic_lb,
+    ymax = ic_ub),
+    width = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal() +
+  labs(
+    y       = "Prevalence (95% CI)",
+    x       = "Age group",
+    caption = "Data collected from Bellolio et al. (2019); 95% CI: exact binomial",
+    title   = "Prevalence of normal mucosa / non-atrophic gastritis (OLGA 0) by age group"
+  )
+
+plot_prev_NG
+
+# ggsave(filename = "prev_olga0_target.png", plot = get_last_plot(), width = 8, height = 5)
+```
+
+# load model inputs
+
+```{r}
+#| eval: true
+#| label: load inputs params Markov Model
+
+
+# Load input file
+inputs_cg_MarkovModel <- readRDS("~/Documents/GitHub/MarkovModel_GastricCancer/2. INPUTS MODEL/MarkovModel_params.rds")
+
+# extract rti_vector for calibration displaisia -> pc1
+df_rti <- inputs_cg_MarkovModel[["df_rti"]]
+rti_vector <- purrr::map_dbl(df_rti$value, 
+                             ~ eval(parse(text = .x)))
+# Check input class
+class(inputs_cg_MarkovModel)
+```
+
+```{r}
+#| eval: true
+#| label: verificacion de largo de elementos
+
+
+lens <- sapply(inputs_cg_MarkovModel, length); lens[lens > 1] ## todo mayor a 1
+```
+
+# carga del modelo de markov
+
+```{r}
+#| eval: true
+#| label: function model
+
+
+# - inputs : PARAMETERS to be estimated through calibration
+# - outputs: correspond to the target data
+
+# call the Markov Model function in this R session
+source("~/Documents/GitHub/MarkovModel_GastricCancer/1. MARKOV MODEL/GastricCancer_MarkovModel_Function.R") 
+
+# call competitive risk correction in this R session
+source("~/Documents/GitHub/MarkovModel_GastricCancer/1. MARKOV MODEL/COMPETITIVE_RISK_CORRECTION.R")
+
+# test the Markov Model function (use de the complete params)
+output_base <- runs_gc_markov(inputs_cg_MarkovModel,
+                              return_trace = TRUE) ## FUNCIONA!!!
+
+
+#NOTA para la calibración, los valores del paper de Bellolio están tomados con pacientes sintomáticos.
+```
+
+```{r}
+#| label: epidemiological outputs - targets
+#| eval: true
+
+options(scipen = 999)
+
+## tramos a plotear
+v_tramos <- c("20-39", "40-49", "50-59", "60-69", "70-79", "80-99")
+
+## 1. incidencia por tramo
+df_incidencia_edad <- data.frame(
+  tramo    = v_tramos,
+  tasa_inc = output_base$incidencia_edad
+)
+
+## 2. incidencia estandarizada (Segi)
+df_incidencia_nacional <- data.frame(
+  tasa_inc_asr = output_base$incidencia_nacional
+)
+
+## 3. mortalidad por tramo
+df_mortalidad <- data.frame(
+  tramo     = v_tramos,
+  tasa_mort = output_base$mortalidad
+)
+
+## 4. proporción por estadio en cada ciclo
+n_ciclos <- length(output_base$PropSick_estadio1)
+df_estadio_ciclo <- data.frame(
+  ciclo    = 1:n_ciclos,
+  edad     = 17 + (1:n_ciclos),
+  estadio1 = output_base$PropSick_estadio1,
+  estadio2 = output_base$PropSick_estadio2,
+  estadio3 = output_base$PropSick_estadio3,
+  estadio4 = output_base$PropSick_estadio4
+)
+
+## 5. Descriptivo: proporción por estadio agregada
+df_estadio_agg <- data.frame(
+  estadio = 1:4,
+  prop    = c(output_base$PropSick_estadio1_agg,
+              output_base$PropSick_estadio2_agg,
+              output_base$PropSick_estadio3_agg,
+              output_base$PropSick_estadio4_agg)
+)
+
+## 5.1 distribución de estadio al diagnóstico (TARGET 3, diagnósticos 30-99 años)
+
+df_estadio_diag <- data.frame(
+  estadio   = 1:4,
+  prop_diag = c(output_base$PropDiag_estadio1,
+                output_base$PropDiag_estadio2,
+                output_base$PropDiag_estadio3,
+                output_base$PropDiag_estadio4)
+)
+
+## 5.2 diagnósticos por estadio en cada ciclo (82 ciclos)
+df_diag_ciclo <- data.frame(
+  ciclo         = seq_along(output_base$diag_estadio1),
+  edad          = 17 + seq_along(output_base$diag_estadio1),
+  diag_estadio1 = output_base$diag_estadio1,
+  diag_estadio2 = output_base$diag_estadio2,
+  diag_estadio3 = output_base$diag_estadio3,
+  diag_estadio4 = output_base$diag_estadio4
+)
+
+## total de diagnósticos por ciclo (debe coincidir con los casos nuevos del modelo)
+df_diag_ciclo$diag_total <- rowSums(df_diag_ciclo[, c("diag_estadio1", "diag_estadio2",
+                                                      "diag_estadio3", "diag_estadio4")])
+
+
+## 6. prevalencia normal-gastritis en los puntos de evaluación
+l_filas_tramos_NG_excel <- list(
+  "19-44" = 2:27,
+  "45-56" = 28:39,
+  "57-66" = 40:49,
+  "67-83" = 50:66
+)
+
+df_prev_NG <- data.frame(
+  tramo      = names(l_filas_tramos_NG_excel),
+  fila_desde = sapply(l_filas_tramos_NG_excel, min),
+  fila_hasta = sapply(l_filas_tramos_NG_excel, max),
+  prev_NG    = output_base$PrevNG_combined,
+  row.names  = NULL
+)
+
+v_filas_eval <- c(6, 21, 32, 46) + 12
+df_prev_NG_punt <- data.frame(
+  fila    = v_filas_eval,
+  edad    = 17 + v_filas_eval,
+  prev_NG = output_base$PrevNG_combined
+)
+
+## 7. prevalencias preneoplásicas agregadas (edades filas 13:83)
+df_prev_agregadas <- data.frame(
+  indicador = c("PrevI_combined", "PrevD_combined", "PrevA_hpp", "PrevA_hpn"),
+  prev      = c(output_base$PrevI_combined,
+                output_base$PrevD_combined,
+                output_base$PrevA_hpp,
+                output_base$PrevA_hpn)
+)
+
+options(scipen = 999)
+
+## 8. tasa de mortalidad por ciclo
+df_mortalidad_ciclo <- data.frame(
+  ciclo     = seq_along(output_base$mortalidad_ciclo),
+  edad      = 17 + seq_along(output_base$mortalidad_ciclo),
+  tasa_mort = output_base$mortalidad_ciclo
+)
+
+## 9. tasa de incidencia por ciclo
+df_incidencia_ciclo <- data.frame(
+  ciclo    = seq_along(output_base$incidencia_ciclo),
+  edad     = 17 + seq_along(output_base$incidencia_ciclo),
+  tasa_inc = output_base$incidencia_ciclo
+)
+
+## 10. traza del modelo
+## requiere output_base <- runs_gc_markov(..., return_trace = TRUE)
+stopifnot(!is.null(output_base$m.M_no_prev))
+
+m_traza <- output_base$m.M_no_prev                 # 83 filas (ciclos 0 a 82) x 39 estados
+
+## chequeo: cada fila suma 1 (incluye Dead)
+stopifnot(all(abs(rowSums(m_traza) - 1) < 1e-8))
+
+df_traza <- data.frame(
+  ciclo = 0:(nrow(m_traza) - 1),                   # ciclo 0 = condición inicial
+  edad  = 18 + 0:(nrow(m_traza) - 1),              # 18 a 100 años
+  m_traza,
+  check.names = FALSE,                             # conserva nombres como "1preclinical"
+  row.names   = NULL                               # quita los rownames "cycle 0", ...
+)
+
+
+df_tasas_ciclo <- data.frame(
+  ciclo     = seq_along(output_base$incidencia_ciclo),
+  edad      = 17 + seq_along(output_base$incidencia_ciclo),
+  tasa_inc  = output_base$incidencia_ciclo,
+  tasa_mort = output_base$mortalidad_ciclo
+)
+
+```
+
+```{r}
+#| label: exportar cada df como una hoja de excel
+
+library(writexl)
+
+lst_outputs_excel <- list(
+  incidencia_tramo    = df_incidencia_edad,
+  incidencia_nacional = df_incidencia_nacional,
+  mortalidad_tramo    = df_mortalidad,
+  tasas_ciclo         = df_tasas_ciclo,
+  estadio_ciclo       = df_estadio_ciclo,
+  estadio_agregado    = df_estadio_agg,
+  estadio_diagnostico = df_estadio_diag,      
+  diag_ciclo          = df_diag_ciclo,  
+  prev_NG             = df_prev_NG,           
+  prev_NG_punt        = df_prev_NG_punt,
+  prev_agregadas      = df_prev_agregadas,
+  traza               = df_traza
+)
+
+write_xlsx(lst_outputs_excel, path = "outputs_modelo_base.xlsx")
+```
+
+```{r}
+#| label: plots incidencia y mortalidad modelo base
+
+
+## 1. tasas por tramo de edad 
+df_tasas_tramo <- data.frame(
+  tramo     = factor(v_tramos, levels = v_tramos),
+  tasa_inc  = output_base$incidencia_edad,
+  tasa_mort = output_base$mortalidad
+)
+
+df_tasas_tramo_long <- pivot_longer(
+  df_tasas_tramo,
+  cols      = c(tasa_inc, tasa_mort),
+  names_to  = "indicador",
+  values_to = "tasa"
+)
+
+plot_tramo <- ggplot(df_tasas_tramo_long,
+                  ## esteticas plot
+                  aes(x      = tramo, 
+                      y      = tasa,
+                      colour = indicador,
+                      group  = indicador)) +
+  
+  geom_line(linewidth = 0.6, alpha = 0.6) +
+  
+  geom_point(size = 3) +
+  
+  scale_colour_manual(values = c(tasa_inc  = "#2C7FB8", 
+                                 tasa_mort = "#D95F0E"),
+                      labels = c(tasa_inc  = "Incidencia", 
+                                 tasa_mort = "Mortalidad")) +
+  
+  labs(x     = "Tramo de edad (años)",
+       y     = "Tasa por 100.000 habs",
+       fill  = NULL,
+       title = "Tasas de incidencia y mortalidad por cáncer gástrico según tramo de edad") +
+  
+  theme_minimal() +
+  
+  theme(legend.position = "bottom")
+
+plot_tramo
+
+# ggsave(filename = "inc_mort_tramos.png", plot = get_last_plot())
+
+
+#############################################
+
+## 2. Tasas ciclo a ciclo
+df_tasas_ciclo_long <- pivot_longer(
+  df_tasas_ciclo,
+  cols      = c(tasa_inc, tasa_mort),
+  names_to  = "indicador",
+  values_to = "tasa"
+)
+
+plot_ciclo <- ggplot(df_tasas_ciclo_long,
+                  aes(x      = edad, 
+                      y      = tasa, 
+                      colour = indicador)) +
+  
+  geom_line(linewidth = 0.9) +
+  
+  scale_colour_manual(values = c(tasa_inc  = "#2C7FB8", 
+                                 tasa_mort = "#D95F0E"),
+                      
+                      labels = c(tasa_inc = "Incidencia", 
+                                 tasa_mort = "Mortalidad")) +
+  
+  scale_x_continuous(breaks = seq(20, 100, by = 10)) +
+  
+  labs(x      = "Edad (años)",
+       y      = "Tasa por 100.000 habs",
+       colour = NULL,
+       title  = "Tasas de incidencia y mortalidad por cáncer gástrico según edad") +
+  
+  theme_minimal() +
+  
+  theme(legend.position = "bottom")
+
+plot_ciclo
+
+# ggsave(filename = "inc_mort_ciclos.png", plot = get_last_plot())
+```
+
+```{r}
+#| label: epidemiological outputs - matplot
+#| eval: true
+
+## llamar a la cohort trace del modelo sin calibrar
+output_base_cohort_trace <- runs_gc_markov(inputs_cg_MarkovModel, return_trace = TRUE)
+
+
+## plotear cohort trace
+model_trace <- output_base_cohort_trace$m.M_no_prev
+v_edad  <- 17 + seq_len(nrow(model_trace))            # ciclo 0 = 18 años ... ciclo 82 = 100 años
+
+m_plot  <- model_trace[, colnames(model_trace) != "Dead"] # sin Dead (no aplastar la escala)
+col_set <- viridis::turbo(ncol(m_plot))
+
+matplot(v_edad,      ## eje X
+        m_plot,      ## eje Y
+        type = "l", 
+        lty  = 1, 
+        col  = col_set,
+        ylab = "Probability of state occupancy",
+        xlab = "Age",
+        main = "Cohort Trace - No intervention (pre-calibración)")
+
+legend("topright", colnames(m_plot), lty = 1, col = col_set, 
+       bty = "n", cex = 0.35, ncol = 6)
+```
+
+```{r}
+#| eval: true
+#| label: Specify calibration parameters  
+
+# names of input parameters to be calibrated -> transition probs en others
+v_param_names <- c(
+  
+  # nombres de parámetros a calibrar // distirbución a priori
+  
+                   ## Hp(-): probabilidades de transición
+                   "p.NnGn_t1",       # t1: normal -> gastritis Hp-  //  BETA
+                   "p.NnGn_t2",       # t2: normal -> gastritis Hp-  //  BETA
+                   "p.NnGn_t3",       # t3: normal -> gastritis Hp-  //  BETA
+                   "p.NnGn_t4",       # t4: normal -> gastritis Hp-  //  BETA
+                   "p.GnAn",          # gastritis  -> atrofia       //  BETA
+                   
+                   ## Hp(+): probabilidades de transición
+                   "p.NpGp_t1",       # t1: normal -> gastritis Hp+  //  BETA
+                   "p.NpGp_t2",       # t2: normal -> gastritis Hp+  //  BETA
+                   "p.NpGp_t3",       # t3: normal -> gastritis Hp+  //  BETA
+                   "p.NpGp_t4",       # t4: normal -> gastritis Hp+  //  BETA
+                   "p.GpAp",          # gastritis  -> atrofia        //  BETA
+
+                   ## atrifia - metaplasia
+                   "p.AI_t1",         # t1_hpn atrofia -> metaplasia    //  BETA
+                   "p.AI_t2",         # t2_hpn atrofia -> metaplasia    //  BETA
+                   "p.AI_t3",         # t3_hpn atrofia -> metaplasia    //  BETA
+                   "p.AI_t4",         # t4_hpn atrofia -> metaplasia    //  BETA
+                   
+                   ## metaplasia - displasia
+                   "p.ID_t1",         # t1: metaplasia  -> displasia   //  BETA
+                   "p.ID_t2",         # t2: metaplasia  -> displasia   //  BETA
+                   "p.ID_t3",         # t3: metaplasia  -> displasia   //  BETA
+                   "p.ID_t4",         # t4: metaplasia  -> displasia   //  BETA
+                   
+                   ## displasia - preclinico
+                   "p.D1p_t1",        # t1: displasia  -> preclinico1   //  BETA
+                   "p.D1p_t2",        # t2: displasia  -> preclinico1   //  BETA
+                   "p.D1p_t3",        # t3: displasia  -> preclinico1   //  BETA
+                   "p.D1p_t4",        # t4: displasia  -> preclinico1   //  BETA
+
+                   ## preclinico - cancer
+                   "p.1p1ca",         # preclinico1 -> clinico1     //  UNIF
+                   "p.1p2p",          # preclinico1 -> preclinico2  //  UNIF
+                   "p.2p2ca",         # preclinico2 -> clinico2     //  UNIF
+                   "p.2p3p",          # preclinico2 -> preclinico3  //  UNIF
+                   "p.3p3ca",         # preclinco3  -> clinico3     //  UNIF
+                   "p.3p4p",          # preclinico3 -> preclinico4  //  UNIF
+                   "p.4p4ca"          # preclinico4 -> clinico4     //  UNIF
+)
+
+n_param <- length(v_param_names)             ## 23 <-  número de parámetros a calibrar
+```
+
+```{r}
+#| eval: true
+#| label: parameters from beta distribution
+
+## For transition probabilities where the exact plausible range is unknown, 
+## we used the point estimation as mean and (mean * 0.1) as sd for derivative 
+## the shape1 (alpha) and shape2(beta) params for to define the beta distribution
+
+val_D1p  <- as.numeric(inputs_cg_MarkovModel[["p.D1p_base"]])
+val_ID   <- as.numeric(inputs_cg_MarkovModel[["p.ID"]])
+val_AI   <- as.numeric(inputs_cg_MarkovModel[["p.AI"]]) 
+val_NnGn <- as.numeric(inputs_cg_MarkovModel[["p.NnGn"]])
+val_NpGp <- as.numeric(inputs_cg_MarkovModel[["p.NpGp"]])
+
+params_beta <- c(
+  
+  "p.NnGn_t1", "p.NnGn_t2", "p.NnGn_t3", "p.NnGn_t4", 
+  
+  "p.GnAn", 
+  
+  "p.NpGp_t1", "p.NpGp_t2", "p.NpGp_t3", "p.NpGp_t4", 
+  
+  "p.GpAp",
+  
+  "p.AI_t1", "p.AI_t2", "p.AI_t3", "p.AI_t4",
+  
+  "p.ID_t1",  "p.ID_t2",  "p.ID_t3",  "p.ID_t4",
+  
+  "p.D1p_t1", "p.D1p_t2", "p.D1p_t3", "p.D1p_t4"
+  )
+
+
+# tramos que reciben CV alto (más libertad por el gradiente etario, cv = 0.75)
+params_tramos <- c(
+  
+  "p.NnGn_t1", "p.NnGn_t2", "p.NnGn_t3", "p.NnGn_t4",
+   
+  "p.NpGp_t1", "p.NpGp_t2", "p.NpGp_t3", "p.NpGp_t4",
+  
+  "p.AI_t1", "p.AI_t2", "p.AI_t3", "p.AI_t4",
+  
+  "p.ID_t1", "p.ID_t2", "p.ID_t3", "p.ID_t4",
+  
+  "p.D1p_t1", "p.D1p_t2", "p.D1p_t3", "p.D1p_t4")
+
+
+# vectores del tamaño de n_param llenos de NA
+v_alpha <- setNames(rep(NA, n_param), v_param_names)
+v_beta  <- setNames(rep(NA, n_param), v_param_names)
+
+v_mean_beta <- sapply(params_beta, function(p) {
+  
+  ## trat prob. normal -> gastritis Hp-
+  if (grepl("^p\\.NnGn_t", p)) {
+    return(val_NnGn)
+  
+  ## trat prob. normal -> gastritis Hp+
+  } else if (grepl("^p\\.NpGp_t", p)) {
+    return(val_NpGp)
+  
+  ## trat prob. metaplasia -> displasia
+  } else if (grepl("^p\\.ID_t", p)) {
+    return(val_ID)
+  
+  ## trat prob displasia -> pre_clinical1  
+  } else if (grepl("^p\\.D1p_t", p)) {
+    return(val_D1p)
+    
+  ## trat prob atrofia -> metaplasia
+  } else if (grepl("^p\\.AI_t", p)) {   
+    return(val_AI)
+    
+  } else {
+    return(as.numeric(inputs_cg_MarkovModel[[p]]))
+  }
+  
+})
+
+v_cv_beta <- ifelse(params_beta %in% params_tramos, 0.75, 0.5)
+names(v_cv_beta) <- params_beta
+
+## p.NpGp_t* tiene media alta (~0.45); CV 0.75 se obtienen shapes < 1 (beta en U) 
+## es como si a priori se pensara que esta prob es muy grande o muy pequeña, pero no centrada
+## bajar el CV para mantener un prior campana ancho.
+v_cv_beta[grep("^p\\.NpGp_t", names(v_cv_beta))] <- 0.5
+
+v_sd_beta   <- v_mean_beta * v_cv_beta
+
+# Calcular y llenar solo las posiciones Beta en los vectores maestros
+
+## Shape 1
+v_alpha[params_beta] <- v_mean_beta * ( (v_mean_beta * (1 - v_mean_beta) / v_sd_beta^2) - 1 )
+
+## Shape 2
+v_beta[params_beta]  <- (1 - v_mean_beta) * ( (v_mean_beta * (1 - v_mean_beta) / v_sd_beta^2) - 1 )
+```
+
+```{r}
+#| label: verif beta params
+#| eval: false
+#| 
+
+data.frame(
+  param = params_beta,
+  mean  = v_mean_beta,
+  sd    = v_sd_beta,
+  alpha = v_alpha[params_beta],
+  beta  = v_beta[params_beta]
+)
+
+# verif all shape params >1
+all(v_alpha[params_beta] > 1) ## todos los alfa mayor a 1
+all(v_beta[params_beta]  > 1) ## todos los beta mayor a 1
+```
+
+```{r}
+#| eval: true
+#| label: parameters from uniform distribution
+
+# range on input search space -> rango valores los inputs de parámetros entre los cuales mantener la búsqueda.
+# transition probabilities will be considerer to come from a uniform distribution, with range in the reported literature
+
+params_unif <- c("p.1p1ca", "p.1p2p", "p.2p2ca", "p.2p3p", "p.3p3ca", "p.3p4p", "p.4p4ca")
+
+# Creamos vectores maestros del tamaño de n_param llenos de NA
+v_lb <- setNames(rep(NA, n_param), v_param_names)
+v_ub <- setNames(rep(NA, n_param), v_param_names)
+
+# Lower Bound
+v_lb["p.1p1ca"]     <- 0 # 0.069671          ## preclinico 1 - clinico 1
+v_lb["p.1p2p"]      <- 0 # 0.122932          ## prelcinico 1 - preclinico 2
+v_lb["p.2p2ca"]     <- 0 # 0.252867          ## preclinico 2 - clinico 2
+v_lb["p.2p3p"]      <- 0 # 0.122932          ## prelcinico 2 - preclinico 3
+v_lb["p.3p3ca"]     <- 0 # 0.252867          ## prelcinico 3 - clinico 3
+v_lb["p.3p4p"]      <- 0                     ## prelcinico 3 - preclinico 4
+v_lb["p.4p4ca"]     <- 0 # 0.339724          ## prelcinico 4 - clinico 4
+
+# Upper Bound
+v_ub["p.1p1ca"]     <- 0.20 # 0.155649        ## preclinico 1 - clinico 1
+v_ub["p.1p2p"]      <- 0.50 # 0.260602        ## preclinico 1 - preclinico 2
+v_ub["p.2p2ca"]     <- 0.30 # 0.499200        ## preclinico 2 - clinico 2
+v_ub["p.2p3p"]      <- 1 # 0.260602           ## preclinico 2 - preclinico 3
+v_ub["p.3p3ca"]     <- 1 # 0.499200           ## preclinico 3 - clinico 3
+v_ub["p.3p4p"]      <- 1                      ## preclinico 3 - preclinico 4
+v_ub["p.4p4ca"]     <- 1 # 0.997823           ## preclinico 4 - clinico 4
+```
+
+```{r}
+#| label: chck v_params
+#| eval: false
+
+
+check_prior <- data.frame(
+  param    = v_param_names,
+  has_beta = !is.na(v_alpha),
+  has_unif = !is.na(v_lb)
+)
+
+all(check_prior$has_beta != check_prior$has_unif)
+```
+
+```{r}
+#| eval: true
+#| label: Sampling from prior dsitribution. Calibration function p1 - IMIS
+
+
+# Specify seed (for reproducible sequence of random numbers)
+set.seed(1989)
+
+# number of random samples
+n_samp <- 35000
+
+
+### Calibration Functions
+
+# Write function to sample from prior
+sample_prior <- function(n_samp){
+  
+  m_lhs_unit   <- randomLHS(n = n_samp,        ## matriz using latin hypercube sampling
+                            k = n_param)
+  
+  m_param_samp <- matrix(nrow = n_samp,        ## create an empty matrix for final results
+                         ncol = n_param)
+  
+  colnames(m_param_samp) <- v_param_names      ## asign names to columns to the empty matrix
+  
+  
+  for (i in 1:n_param) {                       ## iteration loop for each one of the n_param
+    
+    # Conditional logic to choose the correct quantile function
+    if (!is.na(v_alpha[i])) {
+      
+      # prior using beta distributions
+      m_param_samp[, i] <- qbeta(m_lhs_unit[,i],
+                                 shape1 = v_alpha[i],
+                                 shape2 = v_beta[i])
+      
+    } else {
+      
+      # prior using uniform distributions
+      m_param_samp[, i] <- qunif(m_lhs_unit[,i],
+                                 min = v_lb[i],
+                                 max = v_ub[i])
+    }
+  }
+  return(m_param_samp) ## end of the function and return the fill empty matrix m_param_samp
+}
+
+# view resulting parameter set samples
+# pairs.panels(sample_prior(1000))
+```
+
+```{r}
+#| label: Prior distribution. Calibration function p2 - IMIS
+#| eval: true
+
+
+###  PRIOR  ### 
+# Write functions to evaluate log-prior and prior
+
+# function that calculates the log-prior
+## suma de la log densidad de cada parámetro
+calc_log_prior <- function(v_params){
+  
+  if (is.null(dim(v_params))) {             # If vector, change to matrix
+    v_params <- t(v_params)                 # matrix transformation
+  }
+  
+  n_samp <- nrow(v_params)                  # param set in the matrix
+  colnames(v_params) <- v_param_names       # columns names
+  lprior <- rep(0, n_samp)                  # vector full of 0, one for each sample to evaluate
+  
+  for (i in 1:n_param) {                    # loop function
+
+    
+# Conditional logic to choose the correct density function
+    if (!is.na(v_alpha[i])) {
+      
+      # log-prior using beta distributions
+      lprior <- lprior + dbeta(v_params[, i],
+                               shape1 = v_alpha[i],
+                               shape2 = v_beta[i], 
+                               log    = TRUE)
+      
+    } else {
+      
+      # log-prior using uniform distributions
+      lprior <- lprior + dunif(v_params[, i],
+                               min = v_lb[i],
+                               max = v_ub[i], 
+                               log = TRUE)
+    }
+  }
+  return(lprior)
+}
+
+
+
+## verificacion funcion:
+## desde samplei_priori, usa 10 sets de parámetros (matriz 10x29)
+## para cada set suma la log densidad de los 29 params
+calc_log_prior(v_params = sample_prior(10))
+
+
+## Calculo de prioi
+# function that calculates the (non-log) prior, from the prior execute previously
+## una fucnion dentro de una funcion
+calc_prior <- function(v_params) { 
+  exp(calc_log_prior(v_params)) 
+}
+
+
+## verificacion para cada set, pero sin log
+calc_prior(v_params = sample_prior(100))   ## prior calculated for 100 sample priors
+
+## hasta aquí funciona bien!
+```
+
+```{r}
+#| label: chequeo a priori
+#| eval: false
+
+# El log-prior de muestras válidas debe ser finito y negativo
+samp_test <- sample_prior(10)
+lp <- calc_log_prior(samp_test)
+all(is.finite(lp))   # debe ser TRUE
+```
+
+```{r}
+#| eval: true
+
+# calibration targets
+v_target_names <- c(
+  # Targets
+                    ## Cancer targets
+                    "incidencia",                 ## Incidencia estandarizada
+                    "incidencia_edad",            ## Incidencia por edad específica
+                    "PropSick_stages",            ## RHC con código C-16
+                    "PrevNG_combined",            ## Prevalencia de normal-gastritis
+                    "PrevI_combined",             ## Prevalencia de metaplasia intestinal
+                    "PrevD_combined",             ## Prevalencia de displasia
+                    "PrevA_hpp",                  ## Prevalencia de atrofia hp+
+                    "PrevA_hpn"                   ## Prevalencia de atrofia hp-
+                    
+                    )    ## nombre de targets de calibración 
+
+
+n_target <- length(v_target_names)                ## número de targets de calibración
+```
+
+
+```{r}
+#| eval: true
+#| label: Likelihood function. Calibration function p3 - IMIS
+
+###  LIKELIHOOD  ###
+# A list to index each target (indicate in wich cycles to evaluate model result to compare with real data)
+
+# Write functions to evaluate log-likelihood and likelihood
+
+# helpers fucntions
+logit <- function(p) log(p/(1-p))
+
+clamp <- function(p, eps = 1e-10) pmin(pmax(p, eps), 1 - eps)
+
+## expandir vector de probabilidades de displasia a preclinico
+expand_p.D1p <- function(t1, t2, t3, t4) {
+  c(rep(t1, 42), rep(t2, 10), rep(t3, 10), rep(t4, 20))
+}
+
+## expandir vector de probabilidades de metaplasia a displasia
+expand_p.ID <- function(t1, t2, t3, t4) {
+  c(rep(t1, 42), rep(t2, 10), rep(t3, 10), rep(t4, 20))
+}
+
+## expandir vector de probabilidades de atrofia a displasia
+expand_p.AI <- function(t1, t2, t3, t4) {
+  c(rep(t1, 42), rep(t2, 10), rep(t3, 10), rep(t4, 20))
+}
+
+## expandir vector de probabilidades de normal a gastritis Hp-
+expand_p.NnGn <- function(t1, t2, t3, t4) {
+  c(rep(t1, 42), rep(t2, 10), rep(t3, 10), rep(t4, 20))
+}
+
+## expandir vector de probabilidades de normal a gastritis Hp+
+expand_p.NpGp <- function(t1, t2, t3, t4) {
+  c(rep(t1, 42), rep(t2, 10), rep(t3, 10), rep(t4, 20))
+}
+
+# function to calculate the log-likelihood
+calc_log_lik <- function(v_params){
+  
+  # par_vector: a vector (or matrix) of model parameters 
+  if (is.null(dim(v_params))) {         # If vector, change to matrix
+    v_params <- t(v_params) 
+  }
+  
+  n_samp <- nrow(v_params)              # param set to evaluate
+  
+  v_llik <- matrix(0,                   # matrix full of 0
+                   nrow = n_samp,       # each row is a param set
+                   ncol = n_target)     # each column is a specific target: ntarget created in the first chunk below
+  
+  llik_overall <- numeric(n_samp)       # empty vector to save result from each para set 
+  
+  
+  for (j in 1:n_samp) {       # j=1; loop function
+    jj <- tryCatch( {         # tryCatch() -> function for to catch erros and warnings running an R code
+                              # with this, if a param set make the model colapse, not the entire function stops
+      
+      # Copia completa de todos los parámetros
+      v_params_all <- inputs_cg_MarkovModel
+      
+      # Sobreescribir parámetros calibrados 
+      params_no_rti <- v_param_names[!v_param_names %in% c("p.D1p_t1", "p.D1p_t2", "p.D1p_t3", "p.D1p_t4",
+                                                           "p.ID_t1", "p.ID_t2", "p.ID_t3", "p.ID_t4",
+                                                           "p.AI_t1", "p.AI_t2", "p.AI_t3", "p.AI_t4",
+                                                           "p.NnGn_t1", "p.NnGn_t2", "p.NnGn_t3", "p.NnGn_t4",
+                                                           "p.NpGp_t1", "p.NpGp_t2", "p.NpGp_t3", "p.NpGp_t4")]
+      
+      v_params_all[params_no_rti] <- v_params[j, params_no_rti]
+      
+      v_params_all[["p.D1p"]] <- expand_p.D1p(
+        v_params[j, "p.D1p_t1"],               ## 20 - 59
+        v_params[j, "p.D1p_t2"],               ## 60 - 69
+        v_params[j, "p.D1p_t3"],               ## 70 - 79
+        v_params[j, "p.D1p_t4"]                ## 80 - 99
+        )
+      
+      
+      
+      v_params_all[["p.ID"]] <- expand_p.ID(
+        v_params[j, "p.ID_t1"],                ## 20 - 59
+        v_params[j, "p.ID_t2"],                ## 60 - 69
+        v_params[j, "p.ID_t3"],                ## 70 - 79
+        v_params[j, "p.ID_t4"]                 ## 80 - 99
+        )
+
+      v_params_all[["p.AI"]] <- expand_p.AI(
+        v_params[j, "p.AI_t1"],                ## 20 - 59
+        v_params[j, "p.AI_t2"],                ## 60 - 69
+        v_params[j, "p.AI_t3"],                ## 70 - 79
+        v_params[j, "p.AI_t4"]                 ## 80 - 99
+        )
+      
+            v_params_all[["p.NnGn"]] <- expand_p.NnGn(
+        v_params[j, "p.NnGn_t1"],              ## 20 - 59
+        v_params[j, "p.NnGn_t2"],              ## 60 - 69
+        v_params[j, "p.NnGn_t3"],              ## 70 - 79
+        v_params[j, "p.NnGn_t4"]               ## 80 - 99
+        )
+
+      v_params_all[["p.NpGp"]] <- expand_p.NpGp(
+        v_params[j, "p.NpGp_t1"],              ## 20 - 59
+        v_params[j, "p.NpGp_t2"],              ## 60 - 69
+        v_params[j, "p.NpGp_t3"],              ## 70 - 79
+        v_params[j, "p.NpGp_t4"]               ## 80 - 99
+        )
+                       # Reconstruir vectores temporales desde valores base calibrados
+                       # p.D1p_j <- v_params[j, "p.D1p_base"]
+                       # enlace para pasar p.D1p_base_j, a p.D1p que recibe el modelo.
+                       # v_params_all[["p.D1p"]] <- 1 - exp(-(-log(1 - p.D1p_j)) * rti_vector)
+      
+      
+      
+      # Ejecutar el modelo con el set completo
+      model_res <- runs_gc_markov(v_params_all)
+      
+
+###  Calculate log-likelihood of model outputs to targets  ###
+      ## chequear que las salidas previas existan!!!
+      stopifnot(
+        !is.null(model_res$incidencia_nacional),
+        !is.null(model_res$incidencia_edad),
+        !is.null(model_res$PropDiag_estadio1),
+        !is.null(model_res$PropDiag_estadio2),
+        !is.null(model_res$PropDiag_estadio3),
+        !is.null(model_res$PropDiag_estadio4),
+        !is.null(model_res$PrevNG_combined),
+        !is.null(model_res$PrevA_hpp),  
+        !is.null(model_res$PrevA_hpn)
+      )
+      
+      ## TARGET 1: incidencia nacional ASR (normal, escalar)
+      v_llik[j, 1] <- dnorm(
+        x    = model_res$incidencia_nacional,
+        mean = lst_targets$incidencia$value,
+        sd   = lst_targets$incidencia$sd,
+        log  = TRUE
+      )
+
+      ## TARGET 2: incidencia por edad (normal, 6 tramos)
+      v_llik[j, 2] <- sum(dnorm(
+        x    = model_res$incidencia_edad,
+        mean = lst_targets$incidencia_edad$value,
+        sd   = lst_targets$incidencia_edad$sd,
+        log  = TRUE
+      ))
+
+      ## TARGET 3: estadios clínicos (multinomial)
+      ## estadios al diagnóstico: prop de diagnósticos por estadio (30-99 años)
+      v_obs_conteos <- c(
+        lst_targets$PropSick_estadio1$conteo,
+        lst_targets$PropSick_estadio2$conteo,
+        lst_targets$PropSick_estadio3$conteo,
+        lst_targets$PropSick_estadio4$conteo
+      )
+      
+      v_mod_prop_diag <- c(
+        model_res$PropDiag_estadio1,
+        model_res$PropDiag_estadio2,
+        model_res$PropDiag_estadio3,
+        model_res$PropDiag_estadio4
+      )
+      
+      v_llik[j, 3] <- dmultinom(
+        x    = v_obs_conteos,
+        prob = v_mod_prop_diag,
+        log  = TRUE
+      )
+
+      ## TARGET 4: gastritis/OLGA-0 (binomial, 4 tramos)
+      v_llik[j, 4] <- sum(dbinom(
+        x    = lst_targets$PrevNG_combined$conteo,
+        size = lst_targets$PrevNG_combined$size,
+        prob = clamp(model_res$PrevNG_combined),
+        log  = TRUE
+      ))
+
+      ## TARGET 5: metaplasia (normal en logit)
+      v_llik[j, 5] <- dnorm(
+        x    = logit(clamp(model_res$PrevI_combined)),
+        mean = lst_targets$PrevI_combined$logit_pred,
+        sd   = lst_targets$PrevI_combined$sd_logit,
+        log  = TRUE
+      )
+
+      ## TARGET 6: displasia (normal en logit)
+      v_llik[j, 6] <- dnorm(
+        x    = logit(clamp(model_res$PrevD_combined)),
+        mean = lst_targets$PrevD_combined$logit_pred,
+        sd   = lst_targets$PrevD_combined$sd_logit,
+        log  = TRUE
+      )
+
+      ## TARGET 7: atrofia hp+ (normal en logit)
+      v_llik[j, 7] <- dnorm(
+        x    = logit(clamp(model_res$PrevA_hpp)),
+        mean = lst_targets$PrevA_hpp$logit_pred,
+        sd   = lst_targets$PrevA_hpp$sd_logit,
+        log  = TRUE
+      )
+
+      ## TARGET 8: atrofia hp- (normal en logit)
+      v_llik[j, 8] <- dnorm(
+        x    = logit(clamp(model_res$PrevA_hpn)),
+        mean = lst_targets$PrevA_hpn$logit_pred,
+        sd   = lst_targets$PrevA_hpn$sd_logit,
+        log  = TRUE
+      )
+
+      llik_overall[j] <- sum(v_llik[j, ])
+
+    }, error = function(e) NA) # { message("set ", j, ": ", conditionMessage(e)); NA })
+
+    if (is.na(jj)) llik_overall[j] <- -Inf
+  }
+
+  return(llik_overall)
+}
+    
+calc_likelihood <- function(v_params){
+  
+  # Al restar el máximo, el "mejor" set de parámetros tendrá exp(0) = 1, 
+  # y los demás escalarán en proporción, evitando el underflow a cero absoluto.
+  # v_llik <- calc_log_lik(v_params)
+  # max_llik <- max(v_llik, na.rm = TRUE)
+  # return(exp(v_llik - max_llik))
+  
+  ## Alarid
+  exp(calc_log_lik(v_params))
+  # con esto, cada muestra tiene su propia verosimilitud, sin reescalar segun las demas muestras
+  # así, los pesos que se comparan en imis son comparables al lote inical, de cada iteracion y entre cadenas
+  # lo unico es que hay que revisar ya que exp(x) = 0 cuando, x ~ -745
+  # si una iteracion, todas las muestras quedan bajo ese valor, imis falla (0/0)
+  
+} 
+  
+calc_log_lik(v_params = sample_prior(100))
+
+```
+
+```{r}
+#| eval: true
+#| label: Posterior distribution. calibration function p4 - IMIS
+
+
+###  POSTERIOR  ###
+# Write functions to evaluate log-posterior and posterior
+
+# function that calculates the log-posterior
+calc_log_post <- function(v_params) { 
+  lpost <- calc_log_prior(v_params) + calc_log_lik(v_params)
+  return(lpost) 
+}
+
+calc_log_post(v_params = sample_prior(100))
+
+# function that calculates the (non-log) posterior
+# calc_post <- function(v_params) { 
+#  exp(calc_log_post(v_params)) 
+#}
+
+# calc_post(v_params = sample_prior(10))
+
+
+## reemplazada para evitar underflow (exp(x)=0) cuando x < -745
+calc_post <- function(v_params) { 
+  log_post     <- calc_log_post(v_params)     ## log-posterior absoluta (log.prior + log-lokelihood)
+  log_post_max <- max(log_post, na.rm = TRUE)
+  exp(log_post - log_post_max)
+}
+
+```
+
+```{r}
+m_test <- sample_prior(5)
+calc_log_prior(m_test)   # debería ser finito
+calc_log_lik(m_test)
+```
+
+```{r}
+#| eval: false
+#| label: calibrate - one core
+
+## revisar parámetros para calibrar, el B.re 
+
+# record start time of calibration
+t_init <- Sys.time()
+
+###  Bayesian calibration using IMIS  ###
+# define three functions needed by IMIS: prior(x), likelihood(x), sample.prior(n)
+prior <- calc_prior
+likelihood <- calc_likelihood
+sample.prior <- sample_prior
+
+# run IMIS
+fit_imis <- IMIS(B = 1000,        # the incremental sample size at each iteration of IMIS
+                 B.re = n_samp,   # the desired posterior sample size
+                 number_k = 10,   # the maximum number of iterations in IMIS
+                 D = 0) 
+
+# obtain draws from posterior
+m_calib_res <- fit_imis$resample
+
+# Calculate log-likelihood (overall fit) and posterior probability of each sample
+m_calib_res <- cbind(m_calib_res, 
+                      "Overall_fit"    = calc_log_lik(m_calib_res[, v_param_names]),
+                      "Posterior_prob" = calc_post(m_calib_res[, v_param_names]))
+
+# normalize posterior probability
+m_calib_res[,"Posterior_prob"] <- m_calib_res[,"Posterior_prob"]/sum(m_calib_res[, "Posterior_prob"])
+
+# Calculate computation time
+comp_time <- Sys.time() - t_init
+
+```
+
+```{r}
+#| eval: false
+#| 
+print(comp_time)
+
+# verificar dimensiones del resultado
+dim(m_calib_res)
+head(m_calib_res)
+
+# resumen de la posterior
+summary(m_calib_res[, "Overall_fit"])
+summary(m_calib_res[, "Posterior_prob"])
+```
+
+```{r}
+#| eval: false
+#| 
+nrow(unique(m_calib_res[, v_param_names]))
+
+# verificar varianza de cada parámetro
+apply(m_calib_res[, v_param_names], 2, var)
+```
+
+```{r}
+#| eval: false
+#| label: chequeos varios
+
+
+# tomar el set único encontrado
+v_unique <- unique(m_calib_res[, v_param_names])[1, ]
+
+# correr el modelo
+v_params_all <- inputs_cg_MarkovModel
+
+              # params_no_rti <- v_param_names[!v_param_names %in% c("p.D1p")]
+params_no_rti <- v_param_names[!v_param_names %in% c("p.D1p_t1","p.D1p_t2","p.D1p_t3","p.D1p_t4")]
+
+v_params_all[params_no_rti] <- v_unique[params_no_rti]
+
+
+            # v_params_all[["p.Dn1p"]] <- 1 - exp(-(-log(1 - v_unique["p.Dn1p_base"])) * rti_vector)
+v_params_all[["p.D1p"]] <- expand_p.D1p(m_calib_res[i, "p.D1p_t1"], m_calib_res[i, "p.D1p_t2"],
+                                        m_calib_res[i, "p.D1p_t3"], m_calib_res[i, "p.D1p_t4"]
+                                        )
+
+
+model_res <- runs_gc_markov(v_params_all)
+
+# descomponer
+ll_inc <- sum(dpois(x = lst_targets$incidencia$value, lambda = model_res$incidencia, log = TRUE))
+v_obs_conteos <- c(lst_targets$PropSick_estadio1$conteo, lst_targets$PropSick_estadio2$conteo, lst_targets$PropSick_estadio3$conteo, lst_targets$PropSick_estadio4$conteo)
+v_mod_prop_agg <- c(model_res$PropSick_estadio1_agg, model_res$PropSick_estadio2_agg, model_res$PropSick_estadio3_agg, model_res$PropSick_estadio4_agg)
+ll_stages <- dmultinom(x = v_obs_conteos, prob = v_mod_prop_agg, log = TRUE)
+ll_PrevA <- sum(dbinom(x = lst_targets$PrevA_combined$conteo, size = lst_targets$PrevA_combined$size, prob = model_res$PrevA_combined, log = TRUE))
+ll_PrevI <- sum(dbinom(x = lst_targets$PrevI_combined$conteo, size = lst_targets$PrevI_combined$size, prob = model_res$PrevI_combined, log = TRUE))
+ll_PrevD <- sum(dbinom(x = lst_targets$PrevD_combined$conteo, size = lst_targets$PrevD_combined$size, prob = model_res$PrevD_combined, log = TRUE))
+
+data.frame(
+  target = c("incidencia", "estadios", "PrevA", "PrevI", "PrevD"),
+  log_lik = c(ll_inc, ll_stages, ll_PrevA, ll_PrevI, ll_PrevD)
+)
+```
+
+```{r}
+#| eval: true
+#| label: paralelización cadenas - five cores
+
+## ------- Configuración paralelización ------- ##
+
+library(parallel)
+library(doParallel)
+library(foreach)
+
+# elementos calibración
+imis_B <-  2000  ## incremental sample size en cada iteracion
+imis_K <-  200   ## numero de iteraciones de IMIS
+
+## elementos para exportar se guardan junto a las 
+## cadenas para luego usar en script de visualización
+v_export <- c(
+  "inputs_cg_MarkovModel", "lst_targets",  "v_param_names", "n_param",
+  
+  "v_alpha", "v_beta", "v_lb", "v_ub","n_target", "n_samp", "imis_B",
+  
+  "imis_K", "expand_p.D1p", "expand_p.ID", "expand_p.AI", 
+  
+  "expand_p.NnGn", "expand_p.NpGp", "logit", "clamp", "calc_log_prior", 
+  
+  "calc_prior", "calc_log_lik", "calc_likelihood", 
+  
+  "calc_log_post", "calc_post", "sample_prior"
+)
+
+v_function_export <- c("runs_gc_markov", "competitive_risk_correction")
+
+# 4 cores (uno por cadena)
+n_cores <- 5
+cl <- parallel::makeCluster(n_cores)
+doParallel::registerDoParallel(cl)
+
+cat("Calibración paralela con", n_cores, "cadenas IMIS independientes...\n")
+
+
+## ------- Ejecución de las 4 cadenas en paralelo ------- ##
+
+t_init <- Sys.time()
+
+l_cadenas_imis <- foreach(
+  
+  i_chain   = 1:5,                                 ## 5 cadenas
+  
+  .packages = c("IMIS", "lhs", "dplyr", "purrr"),  ## paquetes necesarios
+  
+  .errorhandling = "pass",                         ## no abortar todas las cadenas si una falla
+  
+  .export   = v_export                             ## objetos a usar
+  
+  ) %dopar% {
+  
+  # cargar funciones del modelo en cada worker
+  source("GastricCancer_MarkovModel_Function.R")
+  source("COMPETITIVE_RISK_CORRECTION.R")
+  
+    # asignar funciones que usa IMIS
+  assign("prior",        calc_prior,      envir = .GlobalEnv)
+  assign("likelihood",   calc_likelihood, envir = .GlobalEnv)
+  assign("sample.prior", sample_prior,    envir = .GlobalEnv)
+  
+  # semilla única por cadena (reproducibilidad)
+  set.seed(1989 + i_chain * 1000)
+  
+  # capturar todos los mensajes (warnings de re-scaling) para no saturar la consola
+  output_capturado <- capture.output({
+    
+    fit_imis <- IMIS(B        = imis_B,   ## incremental sample size en cada iteracion de imis
+                     B.re     = n_samp,   ## tamaño muestra distirb posteriori (35000)
+                     number_k = imis_K,   ## numero iteraciones IMIS
+                     D        = 0)
+    
+  }, type = "message")
+  
+  # extraer muestras posteriores y agregar columnas de fit
+  m_calib_res <- fit_imis$resample
+  
+  m_calib_res <- cbind(m_calib_res,
+                       "Overall_fit"    = calc_log_lik(m_calib_res[, v_param_names]),
+                       "Posterior_prob" = calc_post(m_calib_res[, v_param_names]))
+  
+  # normalizar
+  m_calib_res[, "Posterior_prob"] <- m_calib_res[, "Posterior_prob"] / sum(m_calib_res[, "Posterior_prob"])
+  
+  # devolver lista con info de la cadena
+  list(
+    chain_id    = i_chain,
+    seed        = 1989 + i_chain * 1000,
+    m_calib_res = m_calib_res,
+    fit_imis    = fit_imis
+  )
+}
+
+parallel::stopCluster(cl)
+comp_time_total <- Sys.time() - t_init
+session_calib   <- sessionInfo()                 
+
+fecha_calib <- format(t_init, "%d%m%y")
+
+## guardado de cadenas
+saveRDS(l_cadenas_imis, paste0("l_cadenas_imis_", fecha_calib, ".rds"))
+
+## guardado de elementos para visualizar en RData
+save(list = c(
+   "l_cadenas_imis",            ## resultados de las 4 cadenas
+   v_export,                    ## todo lo exportado a los workers
+   v_function_export,                ## funciones del modelo (versión usada en esta calibración)
+   "v_export", "v_function_export",  ## registro de qué cosas contiene el archivo
+   "comp_time_total", 
+   "session_calib", 
+   "fecha_calib"
+   ),
+   
+     file = paste0("calibracion_imis_", fecha_calib, ".RData" ## guardado de archivo RData.
+))
+
+cat("Calibración completada en:", round(as.numeric(comp_time_total, units = "mins"), 2), "minutos\n")
+cat("Resultado guardado en: l_cadenas_imis_", fecha_calib, ".RData\n", sep = "")
+```
